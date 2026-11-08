@@ -1,0 +1,531 @@
+--- a/recompiled/ppu_recomp_004.cpp
++++ b/recompiled/ppu_recomp_004.cpp
+@@ -24385,6 +24385,7 @@
+         { g_trampoline_fn = (void(*)(void*))func_0017CB30; return; }
+ }
+ 
++extern "C" void saka_ball_vec_hook(ppu_context* ctx);   /* saka_hooks.c */
+ void func_0017CB30(ppu_context* ctx) {
+     PPU_MM_SNAP
+         uint64_t _cs_23 = ctx->gpr[23];
+@@ -24553,6 +24554,7 @@
+         { uint8_t* a = (uint8_t*)&ctx->vr[2]; uint8_t* b = (uint8_t*)&ctx->vr[3]; uint8_t* c = (uint8_t*)&ctx->vr[5]; uint8_t* d = (uint8_t*)&ctx->vr[2]; uint8_t tmp[16]; for (int i = 0; i < 16; i++) { uint8_t sel = c[i] & 0x1F; tmp[i] = (sel < 16) ? a[sel] : b[sel - 16]; } memcpy(d, tmp, 16); }
+         { uint8_t* a = (uint8_t*)&ctx->vr[2]; uint8_t* b = (uint8_t*)&ctx->vr[29]; uint8_t* c = (uint8_t*)&ctx->vr[6]; uint8_t* d = (uint8_t*)&ctx->vr[29]; uint8_t tmp[16]; for (int i = 0; i < 16; i++) { uint8_t sel = c[i] & 0x1F; tmp[i] = (sel < 16) ? a[sel] : b[sel - 16]; } memcpy(d, tmp, 16); }
+ loc_0017CD88:
++        saka_ball_vec_hook(ctx);   /* 60-tick ball: vr29 = drawn position (saka_hooks.c) */
+         ctx->gpr[3] = ctx->gpr[31] | 0x0;
+         ctx->lr = 0x0017CD90; func_001F0D40(ctx); DRAIN_TRAMPOLINE(ctx);
+         ctx->gpr[3] = (int64_t)(int32_t)(0x1A0);
+@@ -26009,6 +26011,7 @@
+         { g_trampoline_fn = (void(*)(void*))func_0017E1D8; return; }
+ }
+ 
++extern "C" void saka_anim60_adjust(uint32_t key, double* v);   /* saka_hooks.c */
+ void func_0017E1D8(ppu_context* ctx) {
+     PPU_MM_SNAP
+         uint64_t _cs_25 = ctx->gpr[25];
+@@ -26055,6 +26058,7 @@
+         ctx->gpr[27] = vm_read32(ctx->gpr[31] + 0x94);
+         ctx->gpr[26] = ctx->gpr[28] | 0x0;
+         { uint32_t tmp = vm_read32(ctx->gpr[31] + 0x84); float ftmp; memcpy(&ftmp, &tmp, 4); ctx->fpr[30] = ftmp; }
++        saka_anim60_adjust((uint32_t)ctx->gpr[31] | 1u, &ctx->fpr[30]);   /* SAKA_ANIM60: the model's own time (this+0x84) */
+         ctx->gpr[3] = ctx->gpr[3] + (int64_t)(-7768);
+         ctx->gpr[5] = (int64_t)(int32_t)(-1);
+         ctx->gpr[6] = ctx->gpr[26] | 0x0;
+--- a/recompiled/ppu_recomp_025.cpp
++++ b/recompiled/ppu_recomp_025.cpp
+@@ -70663,12 +70663,15 @@
+         { g_trampoline_fn = (void(*)(void*))func_001F0D34; return; }
+ }
+ 
++extern "C" void saka_ball_pos_hook(uint32_t dst, uint32_t obj, uint32_t lr);   /* saka_hooks.c, SAKA_ANIM60 */
+ void func_001F0CE8(ppu_context* ctx) {
+     PPU_MM_SNAP
++        const uint32_t saka_obj = (uint32_t)ctx->gpr[4], saka_dst = (uint32_t)ctx->gpr[3] & ~0xFu, saka_lr = (uint32_t)ctx->lr;
+         { uint64_t _a = ctx->gpr[4]; uint64_t _r = _a + (uint64_t)(int64_t)(0x170); ctx->gpr[4] = _r; ctx->xer = (ctx->xer & ~(1u << 29)) | ((_r < _a) ? (1u << 29) : 0u); }
+         ctx->gpr[4] = ppc_rldicl(ctx->gpr[4], 0, 32);
+         { uint64_t ea = (ctx->gpr[4]) & ~0xFULL; vm_raw_ld16(&ctx->vr[2], ea); }
+         { uint64_t ea = (ctx->gpr[3]) & ~0xFULL; vm_raw_st16(ea, &ctx->vr[2]); }
++        saka_ball_pos_hook(saka_dst, saka_obj, saka_lr);
+         return;
+         /* nop */;
+         /* TODO: .word 0x00010203 */;
+@@ -73512,9 +73515,12 @@
+         { g_trampoline_fn = (void(*)(void*))func_001F2F80; return; }
+ }
+ 
++extern "C" void saka_anim_time_hook(ppu_context* ctx, uint32_t player);   /* saka_hooks.c, SAKA_ANIM60 */
+ void func_001F2D94(ppu_context* ctx) {
+     PPU_MM_SNAP
++        const uint32_t saka_player = (uint32_t)ctx->gpr[3];
+         { uint32_t tmp = vm_read32(ctx->gpr[3] + 0x74); float ftmp; memcpy(&ftmp, &tmp, 4); ctx->fpr[1] = ftmp; }
++        saka_anim_time_hook(ctx, saka_player);
+         return;
+         return;
+         ctx->gpr[4] = ppc_rlw64(ctx->gpr[4], 0, 24, 31, 0, 0);
+--- a/saka_hooks.c
++++ b/saka_hooks.c
+@@ -10,6 +10,8 @@
+ #include <stdio.h>
+ #include <stddef.h>
+ #include <string.h>
++#include <math.h>
++#include <time.h>
+ #ifdef _WIN32
+ #  ifndef WIN32_LEAN_AND_MEAN
+ #    define WIN32_LEAN_AND_MEAN
+@@ -153,7 +155,12 @@
+  * SAKA_LOGIC60_MATCH30=0 steps the match every tick (2x speed, for A/B).
+  * patches/recompiled-0004-logic60-match30.patch. */
+ static volatile unsigned s_logic60_tick;
+-void saka_logic60_tick(void) { s_logic60_tick++; }
++static unsigned saka_sim_ticks_now(void);
++void saka_pos_scan_tick(unsigned frame, unsigned sim_ticks);   /* main.cpp, SAKA_POS_SCAN (diagnostic) */
++static void saka_pose_frame(void);
++void saka_mem_dump_frame(unsigned sim_ticks, int no_tick_frame);   /* main.cpp, SAKA_MEM_DUMP (diagnostic) */
++void saka_watch_frame(unsigned sim_ticks);   /* main.cpp, SAKA_WATCH (diagnostic) */
++void saka_logic60_tick(void) { s_logic60_tick++; saka_mem_dump_frame(saka_sim_ticks_now(), (int)(s_logic60_tick & 1u)); saka_watch_frame(saka_sim_ticks_now()); saka_pose_frame(); saka_pos_scan_tick(s_logic60_tick, saka_sim_ticks_now()); }
+ int saka_logic60_match_skip(void)
+ {
+     static int on = -1;
+@@ -165,6 +172,103 @@
+     return on && (s_logic60_tick & 1u);
+ }
+ 
++/* ---- 60-tick animation time (on at 60 ticks; SAKA_ANIM60=0 = off) -----------
++ * The player models' per-tick update (Ghidra _opd_FUN_0017e1d8, a virtual
++ * method) reads its match player's animation time through FUN_001f2d94
++ * (player+0x74), advances its skeleton by the difference to the time it saw
++ * last (FUN_00601f44) and evaluates it (FUN_0060206c -> FUN_006035a8). The
++ * skeleton is evaluated every tick, but the match tick advances that time at
++ * 30 Hz, so every other tick the skeleton advances by 0 and repeats the pose
++ * -- bodies, limbs and the root motion that moves them step at 30 Hz.
++ * On a tick without the match tick this getter returns the time half a step
++ * ahead, c + (c - b) / 2, with a, b, c the last three values it read for that
++ * player, when the time went steadily forward (b - a and c - b positive and
++ * within half of each other); the model then advances by half a step each
++ * tick. Its other caller (FUN_0025f1b0, a match-state skeleton) only sets a
++ * display time. A model with an animation controller of its own (this+0x94,
++ * the goalkeepers) uses its own time instead (this+0x84, read in the lifted
++ * func_0017E1D8); moving that one ahead changed the match (match state at
++ * tick 1200 differed from a run without it, while players and ball alone left
++ * it identical), so it is only done with SAKA_ANIM60_GK=1.
++ * The match tick never runs on those ticks and reads the true time; nothing
++ * is written to guest memory. */
++/* History sampled once per match tick: the last value a key was read with
++ * during a tick that ran the match tick becomes its newest sample when it is
++ * next read on another tick. A value that stops changing then shows a zero
++ * step instead of its last movement. */
++typedef struct { uint32_t key, ptick; float a[3], b[3], c[3], pend[3]; uint8_t n, has_pend; } tick_hist;
++static tick_hist s_anim_hist[256];
++static unsigned long long s_anim_ahead, s_anim_kept, s_ball_ahead, s_ball_kept;
++static void th_commit(tick_hist* h, int nc)
++{
++    memcpy(h->a, h->b, (size_t)nc * 4u); memcpy(h->b, h->c, (size_t)nc * 4u); memcpy(h->c, h->pend, (size_t)nc * 4u);
++    if (h->n < 3) h->n++;
++    h->has_pend = 0;
++}
++/* 1 on a tick without the match tick once three samples exist and v is still
++ * the latest sample (moved since: not the match tick's alone). */
++static int th_read(tick_hist* h, const float* v, int nc)
++{
++    const uint32_t T = s_logic60_tick;
++    if (!(T & 1u)) {
++        if (h->has_pend && h->ptick != T) th_commit(h, nc);
++        memcpy(h->pend, v, (size_t)nc * 4u); h->has_pend = 1; h->ptick = T;
++        return 0;
++    }
++    if (h->has_pend) th_commit(h, nc);
++    if (h->n < 3) return 0;
++    for (int k = 0; k < nc; k++) if (v[k] != h->c[k]) return 0;
++    return 1;
++}
++static tick_hist* th_find(tick_hist* t, unsigned size, uint32_t key)
++{
++    for (unsigned k = 0, i = (key >> 4) & (size - 1u); k < size; k++, i = (i + 1u) & (size - 1u)) {
++        if (t[i].key == key) return &t[i];
++        if (!t[i].key) { memset(&t[i], 0, sizeof t[i]); t[i].key = key; return &t[i]; }
++    }
++    return NULL;
++}
++static int saka_anim60_on(void)
++{
++    static int on = -1;
++    if (on < 0) {
++        const char* e = getenv("SAKA_ANIM60");
++        const char* m = getenv("SAKA_LOGIC60_MATCH30");
++        on = saka_logic60() && !(m && *m == '0') && !(e && *e == '0');
++        if (saka_logic60())
++            fprintf(stderr, "[anim60] player animation time between match ticks: %s\n",
++                    on ? "half a step ahead (SAKA_ANIM60=0 = as the match tick left it)" : "as the match tick left it (SAKA_ANIM60=0)");
++    }
++    return on;
++}
++void saka_anim60_adjust(uint32_t key, double* v)
++{
++    if (!saka_anim60_on()) return;
++    { static int gk = -1;   /* keys with bit 0: a model's own time (this+0x84, goalkeepers): SAKA_ANIM60_GK=1 only, it changes the match */
++      if (gk < 0) { const char* e = getenv("SAKA_ANIM60_GK"); gk = e && *e == '1'; }
++      if ((key & 1u) && !gk) return; }
++    const float t = (float)*v;
++    tick_hist* h = th_find(s_anim_hist, 256u, key);
++    if (!h || !th_read(h, &t, 1)) { if (h && (s_logic60_tick & 1u)) s_anim_kept++; return; }
++    const float d1 = h->b[0] - h->a[0], d2 = h->c[0] - h->b[0];
++    if (!(d1 > 0.0f) || !(d2 > 0.0f) || fabsf(d2 - d1) > 0.5f * fmaxf(d1, d2)) { s_anim_kept++; return; }
++    *v = (double)(h->c[0] + 0.5f * d2);
++    s_anim_ahead++;
++}
++void saka_anim_time_hook(ppu_context* ctx, uint32_t player) { saka_anim60_adjust(player, &ctx->fpr[1]); }
++
++static void saka_anim60_stats(void)
++{
++    static time_t t0;
++    const time_t now = time(NULL);
++    if (!t0) t0 = now;
++    if (now - t0 < 5) return;
++    t0 = now;
++    fprintf(stderr, "[anim60] last 5 s: animation times half a step ahead %llu, left %llu; ball %llu ahead, %llu left (not steady)\n",
++            s_anim_ahead, s_anim_kept, s_ball_ahead, s_ball_kept);
++    s_anim_ahead = s_anim_kept = s_ball_ahead = s_ball_kept = 0;
++}
++
+ /* The 30 Hz match tick sees the engine timer as the original game did: the
+  * task manager set it up for a 60 Hz tick (interval 1, dt 1/60, speed factors
+  * x0.5); for the duration of the match tick it shows interval 2, the factors
+@@ -175,8 +279,322 @@
+ static void st_be32(uint32_t ea, uint32_t v) { uint8_t* p = vm_base + ea; p[0] = (uint8_t)(v >> 24); p[1] = (uint8_t)(v >> 16); p[2] = (uint8_t)(v >> 8); p[3] = (uint8_t)v; }
+ static float ld_bef(uint32_t ea) { const uint32_t w = ld_be32(ea); float f; memcpy(&f, &w, 4); return f; }
+ static void st_bef(uint32_t ea, float f) { uint32_t w; memcpy(&w, &f, 4); st_be32(ea, w); }
++
++/* ---- 60-tick ball position (with SAKA_ANIM60) --------------------------------
++ * The ball model's per-tick update (Ghidra _opd_FUN_0017cb30) builds the position
++ * it draws the ball at in vr29, and rolls the ball by the distance moved since
++ * the last tick. Two branches meet at 0x0017CD88: with the ball in play
++ * (FUN_001f0cdc(ball) == 1) a copy of ball+0x170 (ball = match object+0x1A30,
++ * through FUN_001f0ce8); in every other state, most of the match, the position
++ * of the object FUN_0020a1ec returns (+4..+0xC). Only that vector is changed, at
++ * the merge point (saka_ball_vec_hook; SAKA_BALL60=0 = off): the player models'
++ * copy of the ball position turns them toward the ball, and extrapolating it
++ * changed the match (state at tick 1200 differed). The match tick moves the ball
++ * at 30 Hz, so every other tick the ball stood still and did not roll. On a tick
++ * without the match tick the vector gets the position half a step ahead,
++ * c + (c - b)/2 per axis, when the ball moved steadily over the last two match
++ * ticks (|d2 - d1| within half the larger step plus 5 cm, steps up to 20 units)
++ * and has not moved since; kicks, bounces, stops and resets are left as they
++ * are. Both hooks sample their history once per match tick (th_read). */
++static volatile unsigned s_sim_ticks;   /* match ticks run so far (defined with the match-tick hooks below) */
++static tick_hist s_ball_hist[8];
++static int ball60_on(void)
++{
++    static int on = -1;
++    if (on < 0) { const char* e = getenv("SAKA_BALL60"); on = !(e && *e == '0'); }
++    return on && saka_anim60_on();
++}
++/* The FUN_001f0ce8 copy hook (ppu_recomp_025.cpp) only saw the in-play branch,
++ * which is rare; saka_ball_vec_hook covers both, so this entry does nothing. */
++void saka_ball_pos_hook(uint32_t dst, uint32_t obj, uint32_t lr) { (void)dst; (void)obj; (void)lr; }
++static uint32_t ball_bs32(uint32_t x) { return (x >> 24) | ((x >> 8) & 0xFF00u) | ((x << 8) & 0xFF0000u) | (x << 24); }
++static int ball_ahead(uint32_t obj, float v[3]);
++/* Called at 0x0017CD88 in func_0017CB30 (ppu_recomp_004.cpp): vr29 holds the
++ * drawn position in guest byte order, gpr31 is the ball object. */
++void saka_ball_vec_hook(ppu_context* ctx)
++{
++    if (!ball60_on()) return;
++    uint8_t* r = (uint8_t*)&ctx->vr[29];
++    float v[3];
++    for (int k = 0; k < 3; k++) { uint32_t w; memcpy(&w, r + 4 * k, 4); w = ball_bs32(w); memcpy(&v[k], &w, 4); }
++    if (!ball_ahead((uint32_t)ctx->gpr[31], v)) return;
++    for (int k = 0; k < 3; k++) { uint32_t w; memcpy(&w, &v[k], 4); w = ball_bs32(w); memcpy(r + 4 * k, &w, 4); }
++}
++static int ball_ahead(uint32_t obj, float v[3])
++{
++    tick_hist* h = th_find(s_ball_hist, 8u, obj);
++    if (!h || !th_read(h, v, 3)) { if (h && (s_logic60_tick & 1u)) s_ball_kept++; return 0; }
++    float d2[3], dd = 0.0f, l1 = 0.0f, l2 = 0.0f;
++    for (int k = 0; k < 3; k++) {
++        const float d1 = h->b[k] - h->a[k];
++        d2[k] = h->c[k] - h->b[k];
++        dd += (d2[k] - d1) * (d2[k] - d1); l1 += d1 * d1; l2 += d2[k] * d2[k];
++    }
++    dd = sqrtf(dd); l1 = sqrtf(l1); l2 = sqrtf(l2);
++    const int ahead = l2 > 1e-4f && l2 <= 20.0f && dd <= 0.5f * fmaxf(l1, l2) + 0.05f;
++    { static int dbg = -1; static unsigned last, shown;   /* SAKA_BALL_DEBUG=1: one line per tick for 80 ticks */
++      if (dbg < 0) { const char* e = getenv("SAKA_BALL_DEBUG"); dbg = e && *e == '1'; }
++      if (dbg && s_sim_ticks >= 1200u && shown < 80u && last != s_logic60_tick) {
++          last = s_logic60_tick; shown++;
++          fprintf(stderr, "[ball-dbg] tick %u step %.3f prev step %.3f change %.3f%s\n", s_logic60_tick, l2, l1, dd,
++                  ahead ? " -> ahead" : !(l2 > 1e-4f) ? " (still)" : " (not steady)");
++      } }
++    if (!ahead) { s_ball_kept++; return 0; }
++    for (int k = 0; k < 3; k++) v[k] = h->c[k] + 0.5f * d2[k];
++    s_ball_ahead++;
++    return 1;
++}
+ static uint32_t s_sim_timer, s_sim_save[9];
+ static volatile unsigned s_sim_ticks;   /* match ticks run so far (SAKA_SIMTICK_SHOT) */
++
++/* ---- Pose extrapolation at 60 ticks (SAKA_POSE_INTERP=1 = on) --------------
++ * At 60 ticks the match tick runs every other tick. The players' skeletons are
++ * evaluated in those ticks only (func_006035A8, Ghidra FUN_006035a8: animation
++ * layers sampled at their times into 4x4 world matrices, rows w 0,0,0 and a
++ * translation row ending in 1.0); the skinning palettes built from them every
++ * tick then repeat the same pose, so bodies and limbs step at 30 Hz while the
++ * camera moves every tick (hardware watchpoints: those matrices are written
++ * once per match tick, by func_006035A8 alone).
++ * At the start of a tick without the match tick every such matrix is set half
++ * a step ahead -- cur + (cur - prev) / 2 per float -- so the palettes built in
++ * that tick show the in-between pose; at the start of the next tick, before
++ * the match tick runs, it is put back, so the simulation never sees it.
++ *  - Matrices: 16-byte aligned 4x4 world matrices (row lengths 0.5-2.0,
++ *    |cos| <= 0.05, translation within 500) in the pages written during a
++ *    match-tick frame -- the write watch shared with the renderer, listed at
++ *    the start of the next tick, before anything in it runs; measured again
++ *    every 128 match ticks -- outside the main stack.
++ *  - A matrix written by anyone else during a tick without the match tick is
++ *    not the skeleton's: it is put back no more and left alone until the next
++ *    measurement. A matrix that jumped (translation by more than 2, a rotation
++ *    element by more than 1: cuts, teleports, snapped blends) is left as is.
++ * [pose] prints what it tracked and moved every 5 s. */
++int saka_watch_auto(void);                 /* main.cpp, SAKA_WATCH_AUTO (diagnostic) */
++void saka_watch_request(uint32_t ea);
++uint32_t rsx_ww_harvest_low(void);
++uint32_t rsx_ww_written_pages_between(uint32_t lo, uint32_t hi, uint32_t* out, uint32_t max);
++typedef struct {
++    uint32_t ea, wframe;
++    uint8_t have_cur, have_prev, written, bad, moved, jumped;
++    uint8_t prev[64], cur[64], ext[64];
++} pose_mat;
++static pose_mat* s_pm; static uint32_t s_pm_n, s_pm_cap;
++static uint32_t* s_pose_pages;
++static uint32_t s_rg0, s_pose_last_sim, s_pose_last_rescan; static int s_rs;   /* rescan window state */
++static struct { unsigned long long ticks, moved, jumped, put, back, foreign, rescans, pages; double rescan_ms; } s_ps;
++
++static int pose_on(void)
++{
++    static int on = -1;
++    if (on < 0) {
++        const char* e = getenv("SAKA_POSE_INTERP");
++        on = saka_logic60() && (e && *e == '1');
++        if (saka_logic60())
++            fprintf(stderr, "[pose] 60-tick pose extrapolation: %s\n", on ? "on (SAKA_POSE_INTERP=1)" : "off (SAKA_POSE_INTERP=1 = on)");
++    }
++    return on;
++}
++static float pose_bef(const uint8_t* p)
++{
++    const uint32_t w = ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
++    float f; memcpy(&f, &w, 4); return f;
++}
++static void pose_put(uint8_t* p, float f)
++{
++    uint32_t w; memcpy(&w, &f, 4);
++    p[0] = (uint8_t)(w >> 24); p[1] = (uint8_t)(w >> 16); p[2] = (uint8_t)(w >> 8); p[3] = (uint8_t)w;
++}
++/* A 4x4 world matrix at q: three rotation rows (w exactly 0) and a
++ * translation row ending in exactly 1.0. */
++static int pose_is_world(const uint8_t* q)
++{
++    float r[16];
++    for (int i = 0; i < 16; i++) { r[i] = pose_bef(q + 4 * i); if (!isfinite(r[i])) return 0; }
++    if (r[3] != 0.0f || r[7] != 0.0f || r[11] != 0.0f || r[15] != 1.0f) return 0;
++    float len[3];
++    for (int i = 0; i < 3; i++) {
++        len[i] = sqrtf(r[4 * i] * r[4 * i] + r[4 * i + 1] * r[4 * i + 1] + r[4 * i + 2] * r[4 * i + 2]);
++        if (len[i] < 0.5f || len[i] > 2.0f) return 0;
++    }
++    for (int i = 0; i < 3; i++)
++        for (int j = i + 1; j < 3; j++)
++            if (fabsf(r[4 * i] * r[4 * j] + r[4 * i + 1] * r[4 * j + 1] + r[4 * i + 2] * r[4 * j + 2]) > 0.05f * len[i] * len[j]) return 0;
++    for (int i = 12; i < 15; i++) if (fabsf(r[i]) > 500.0f) return 0;
++    return 1;
++}
++static void pose_add(pose_mat** list, uint32_t* n, uint32_t* cap, uint32_t ea)
++{
++    if (*n == *cap) {
++        const uint32_t nc = *cap ? *cap * 2u : 2048u;
++        pose_mat* p = (pose_mat*)realloc(*list, (size_t)nc * sizeof **list);
++        if (!p) return;
++        *list = p; *cap = nc;
++    }
++    pose_mat* m = &(*list)[(*n)++];
++    memset(m, 0, sizeof *m);
++    m->ea = ea;
++}
++/* Start of the tick after a measured match-tick frame: the world matrices in
++ * the pages written during it (generation in (lo, hi]), keeping what was
++ * known about matrices already tracked. */
++static void pose_rescan_scan(uint32_t lo, uint32_t hi)
++{
++    const clock_t c0 = clock();
++    enum { MAXP = 1u << 17 };
++    if (!s_pose_pages) s_pose_pages = (uint32_t*)malloc(MAXP * sizeof(uint32_t));
++    if (!s_pose_pages) return;
++    const uint32_t np = rsx_ww_written_pages_between(lo, hi, s_pose_pages, MAXP);
++    pose_mat* nl = NULL; uint32_t nn = 0, ncap = 0;
++    for (uint32_t i = 0; i < np; i++) {
++        const uint32_t pg = s_pose_pages[i];
++        if (pg >= 0x0FD00000u && pg < 0x10000000u) continue;          /* main-thread stack */
++        const int next = i + 1 < np && s_pose_pages[i + 1] == pg + 4096u;
++        for (uint32_t off = 0; off < 4096u; ) {
++            if (off + 64u > 4096u && !next) break;
++            if (pose_is_world(vm_base + pg + off)) { pose_add(&nl, &nn, &ncap, pg + off); off += 64u; }
++            else off += 16u;
++        }
++    }
++    uint32_t j = 0;
++    for (uint32_t i = 0; i < nn; i++) {
++        while (j < s_pm_n && s_pm[j].ea < nl[i].ea) j++;
++        if (j < s_pm_n && s_pm[j].ea == nl[i].ea) { nl[i] = s_pm[j]; nl[i].bad = 0; }
++    }
++    free(s_pm);
++    s_pm = nl; s_pm_n = nn; s_pm_cap = ncap;
++    s_ps.rescans++; s_ps.pages += np;
++    s_ps.rescan_ms += (double)(clock() - c0) * 1000.0 / CLOCKS_PER_SEC;
++}
++/* Start of a tick without the match tick: the pose the last match tick made
++ * becomes `cur`, the one before `prev`; each matrix that moved is set half a
++ * step ahead for this tick. */
++static void pose_capture_apply(void)
++{
++    for (uint32_t i = 0; i < s_pm_n; i++) {
++        pose_mat* m = &s_pm[i];
++        m->moved = m->jumped = 0;
++        if (m->bad) continue;
++        uint8_t* q = vm_base + m->ea;
++        if (m->have_cur) { memcpy(m->prev, m->cur, 64); m->have_prev = 1; }
++        memcpy(m->cur, q, 64); m->have_cur = 1;
++        if (!m->have_prev || !memcmp(m->prev, m->cur, 64) || !pose_is_world(m->cur) || !pose_is_world(m->prev)) continue;
++        int jump = 0;
++        for (int k = 0; k < 64 && !jump; k += 4) {
++            const float a = pose_bef(m->prev + k), b = pose_bef(m->cur + k);
++            const float d = b - a;
++            if (fabsf(d) > (k >= 48 ? 2.0f : 1.0f)) jump = 1;
++            else pose_put(m->ext + k, b + 0.5f * d);
++        }
++        if (jump) { s_ps.jumped++; m->jumped = 1; continue; }
++        m->moved = 1;
++        memcpy(q, m->ext, 64);
++        m->written = 1; m->wframe = s_logic60_tick;
++        s_ps.moved++;
++        s_ps.put++;
++    }
++}
++/* Start of a tick with the match tick: the skeleton's own pose goes back
++ * before the match tick runs. Overwritten meanwhile: not the skeleton's. */
++static void pose_restore(void)
++{
++    for (uint32_t i = 0; i < s_pm_n; i++) {
++        pose_mat* m = &s_pm[i];
++        if (!m->written) continue;
++        m->written = 0;
++        if (s_logic60_tick - m->wframe > 4u) continue;
++        uint8_t* q = vm_base + m->ea;
++        if (memcmp(q, m->ext, 64)) {
++            m->bad = 1; s_ps.foreign++;
++            if (saka_watch_auto()) {   /* SAKA_WATCH_AUTO=1: who overwrites it (one per 64 KB block) */
++                static uint32_t blocks[4]; static int nb;
++                int seen = 0; for (int b = 0; b < nb; b++) seen |= blocks[b] == (m->ea >> 16);
++                if (!seen && nb < 4) { blocks[nb++] = m->ea >> 16; saka_watch_request(m->ea + 48u); }
++            }
++            continue;
++        }
++        memcpy(q, m->cur, 64);
++        s_ps.back++;
++    }
++}
++static void pose_stats(void)
++{
++    static time_t t0;
++    const time_t now = time(NULL);
++    if (!t0) t0 = now;
++    if (now - t0 < 5) return;
++    t0 = now;
++    uint32_t bad = 0;
++    for (uint32_t i = 0; i < s_pm_n; i++) bad += s_pm[i].bad;
++    fprintf(stderr, "[pose] last 5 s: %u matrices tracked (%u not the skeleton's), match ticks %llu, moved %.0f/tick, "
++                    "jumped %llu, put back %llu, overwritten %llu | rescans %llu (%llu pages, %.1f ms each)\n",
++            s_pm_n, bad, s_ps.ticks, s_ps.ticks ? (double)s_ps.moved / (double)s_ps.ticks : 0.0, s_ps.jumped,
++            s_ps.back, s_ps.foreign, s_ps.rescans, s_ps.pages, s_ps.rescans ? s_ps.rescan_ms / (double)s_ps.rescans : 0.0);
++    { static int dbg = -1; static int shown = 0;
++      if (dbg < 0) { const char* e = getenv("SAKA_POSE_DEBUG"); dbg = e && *e == '1'; }
++      if (dbg && shown < 3 && s_pm_n) {
++          shown++;
++          uint32_t blk = 0xFFFFFFFFu, nt = 0, nb = 0, nm = 0, nj = 0;
++          for (uint32_t i = 0; i <= s_pm_n; i++) {
++              const uint32_t b = i < s_pm_n ? s_pm[i].ea >> 16 : 0xFFFFFFFEu;
++              if (b != blk) {
++                  if (blk != 0xFFFFFFFFu && nt) fprintf(stderr, "[pose-dbg] %04X0000: %u matrices, %u overwritten, %u moved, %u jumped (last tick)\n", blk, nt, nb, nm, nj);
++                  blk = b; nt = nb = nm = nj = 0;
++              }
++              if (i < s_pm_n) { nt++; nb += s_pm[i].bad; nm += s_pm[i].moved; nj += s_pm[i].jumped; }
++          }
++      } }
++    memset(&s_ps, 0, sizeof s_ps);
++}
++/* SAKA_POSE_SHOT=<match tick> with LD_FRAME_DUMP_GATE (+ LD_FRAME_DUMP=<dir>,
++ * LD_FRAME_DUMP_EVERY=1): dump the 10 frames from that match tick on
++ * (diagnostic, to see the in-between frames). */
++static unsigned s_pose_shot_open;
++static void saka_pose_shot_tick(void)
++{
++    static int parsed = 0; static unsigned at = 0; static const char* gate;
++    if (!parsed) { parsed = 1; gate = getenv("LD_FRAME_DUMP_GATE"); if (!gate) gate = getenv("LD_SURF_DUMP_GATE");
++                   const char* e = getenv("SAKA_POSE_SHOT"); at = e ? (unsigned)strtoul(e, NULL, 10) : 0; }
++    if (gate && at && s_sim_ticks == at) {
++        FILE* f = fopen(gate, "w"); if (f) { fputs("1\n", f); fclose(f); }
++        s_pose_shot_open = s_logic60_tick ? s_logic60_tick : 1u;
++        fprintf(stderr, "[pose] dump gate opened at match tick %u\n", s_sim_ticks);
++    }
++}
++/* Every tick's start (saka_logic60_tick). Even ticks run the match tick, odd
++ * ones skip it (saka_logic60_match_skip). While a match runs: odd ticks get
++ * the half step ahead, even ticks put the skeletons' pose back. A measurement
++ * harvests the write watch at the start of a match-tick frame (g0) and at the
++ * start of the next tick, then lists the pages written between before
++ * anything in that tick runs. */
++static void saka_pose_frame(void)
++{
++    if (s_pose_shot_open && s_logic60_tick - s_pose_shot_open >= 10u) {
++        const char* gate = getenv("LD_FRAME_DUMP_GATE");
++        if (!gate) gate = getenv("LD_SURF_DUMP_GATE");
++        if (gate) remove(gate);
++        s_pose_shot_open = 0;
++        fprintf(stderr, "[pose] dump gate closed\n");
++    }
++    if (!pose_on()) return;
++    const int in_match = s_pose_last_sim && s_logic60_tick - s_pose_last_sim <= 3u;
++    if (!in_match) { s_rs = 0; return; }
++    if (!(s_logic60_tick & 1u)) {                        /* this tick runs the match tick */
++        pose_restore();
++        if (s_rs == 0 && s_sim_ticks - s_pose_last_rescan >= (s_pm_n ? 128u : 16u)) {
++            s_rg0 = rsx_ww_harvest_low();
++            s_rs = s_rg0 ? 1 : 0;
++        }
++    } else {                                             /* no match tick this tick */
++        if (s_rs == 1) {
++            const uint32_t g1 = rsx_ww_harvest_low();
++            if (g1) pose_rescan_scan(s_rg0, g1);
++            s_rs = 0;
++            s_pose_last_rescan = s_sim_ticks;
++        }
++        pose_capture_apply();
++    }
++}
++
+ void saka_logic60_sim_begin(void)
+ {
+     s_sim_timer = 0;
+@@ -197,9 +615,13 @@
+         st_bef(t + 0x16C + 4 * i, b * b);
+     }
+ }
++static unsigned saka_sim_ticks_now(void) { return s_sim_ticks; }
+ void saka_logic60_sim_end(void)
+ {
+     s_sim_ticks++;
++    saka_pose_shot_tick();
++    if (saka_anim60_on()) saka_anim60_stats();
++    if (pose_on()) { s_pose_last_sim = s_logic60_tick; s_ps.ticks++; pose_stats(); }
+     /* SAKA_SIMTICK_SHOT=<n>[,<n>...] with LD_SURF_DUMP_GATE=<file>: open the
+      * surface-dump gate at those match ticks (3 dumps, one per other tick), so
+      * a 30-tick and a 60-tick run can be compared at the SAME simulation tick. */

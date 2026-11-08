@@ -1,0 +1,4 @@
+*.bat text eol=crlf
+*.cmd text eol=crlf
+# Patches stay byte for byte: several patch CRLF sources in ps3recomp.
+*.patch -text

@@ -1,0 +1,231 @@
+--- a/libs/video/rsx_live_draw.c
++++ b/libs/video/rsx_live_draw.c
+@@ -74,6 +74,12 @@
+ 
+ #include "rsx_dispatch.h"
+ #include "rsx_fp_decompiler.h"
++
++/* An in-game menu of the executable (Saka port: saka_overlay.cpp): while _on() says so, _draw() records its draws
++ * into the frame's command list over the back buffer (RENDER_TARGET state, its RTV given) before the present. */
++int  (*rsx_live_draw_overlay_on)(void) = NULL;
++void (*rsx_live_draw_overlay_draw)(void* dev, void* queue, void* list, void* backbuffer, size_t rtv,
++                                   unsigned width, unsigned height) = NULL;
+ static unsigned long long g_ld_bind_white = 0, g_ld_bind_real = 0, g_ld_bind_surf = 0;
+ /* Set once PS1 VRAM actually holds a drawn frame (see the PS1_PC heartbeat).
+  * Every surface dump before this is an early-boot snapshot of a framebuffer the
+@@ -9626,11 +9632,52 @@
+     return SUCCEEDED(hr) ? 0 : -1;
+ }
+ 
++/* The present's sync interval (owner, 2026-11-08: "경기 화면에서 버벅거리고"). Default 1, as before.
++ * LD_SYNC_INTERVAL=auto (the launcher's "고주사율 모니터 프레임 간격 맞춤"): at 120/180/240 Hz a frame presented with
++ * interval 1 shows at the next refresh after it is ready, so frames stay up 11, 17 or 22 ms by turns at 180 Hz;
++ * refresh / 60 keeps each up 16.7 ms when frames are on time, but a late frame then stays up 33 ms instead of 22
++ * (sy2 vs fm2, a match: seconds under 58 fps 27 vs 13). Other rates keep 1. LD_SYNC_INTERVAL=<1-4> forces a value.
++ * Looked up again every 5 s, in case the window moves to another monitor. */
++static HWND s_ld_hwnd;
++static UINT ld_sync_interval(void)
++{
++    static UINT cached = 0;
++    static ULONGLONG next = 0;
++    const ULONGLONG now = GetTickCount64();
++    if (cached && now < next) return cached;
++    next = now + 5000;
++    UINT n = 1, hz = 0;
++    const char* e = getenv("LD_SYNC_INTERVAL");
++    if (e && *e && strcmp(e, "auto") != 0) {
++        const int v = atoi(e);
++        n = v >= 1 && v <= 4 ? (UINT)v : 1;
++    } else if (e && *e && s_ld_hwnd) {
++        MONITORINFOEXA mi;
++        memset(&mi, 0, sizeof mi);
++        mi.cbSize = sizeof mi;
++        if (GetMonitorInfoA(MonitorFromWindow(s_ld_hwnd, MONITOR_DEFAULTTONEAREST), (MONITORINFO*)&mi)) {
++            DEVMODEA dm;
++            memset(&dm, 0, sizeof dm);
++            dm.dmSize = sizeof dm;
++            if (EnumDisplaySettingsA(mi.szDevice, ENUM_CURRENT_SETTINGS, &dm)) {
++                hz = dm.dmDisplayFrequency;
++                const UINT k = (hz + 30) / 60, r = hz % 60;
++                if (k >= 2 && k <= 4 && (r == 0 || r == 59 || r == 1)) n = k;
++            }
++        }
++    }
++    if (n != cached)
++        fprintf(stderr, "[live-draw] present sync interval %u (display %u Hz)\n", n, hz);
++    cached = n;
++    return cached;
++}
++
+ int rsx_live_draw_init(void* hwnd, u32 width, u32 height,
+                        rsx_live_guest_ptr_fn guest_fn, void* guest_user)
+ {
+     if (!rsx_live_draw_enabled()) return 0;
+     if (g.ready) return 0;
++    s_ld_hwnd = (HWND)hwnd;
+     ld_present_measure_init();
+ #if defined(YZ_PERF_PROFILE)
+     memset(&g_ld_profile, 0, sizeof(g_ld_profile));
+@@ -10336,7 +10383,7 @@
+ 
+     ld_flush(LD_FLUSH_MOVIE_PRESENT);
+     {
+-        const HRESULT present_hr = g.swap->lpVtbl->Present(g.swap, 1, 0);
++        const HRESULT present_hr = g.swap->lpVtbl->Present(g.swap, ld_sync_interval(), 0);
+         if (SUCCEEDED(present_hr))
+             ld_present_measure_record(g_ld_frames);
+         else {
+@@ -10878,11 +10925,20 @@
+ 
+     g.list->lpVtbl->CopyResource(g.list, bb, srcimg);
+ 
++    /* An in-game menu of the executable (rsx_live_draw_overlay_on / _draw) is drawn over the back buffer here,
++     * between the copy of the guest frame and the present. */
++    const int overlay = rsx_live_draw_overlay_on && rsx_live_draw_overlay_draw && rsx_live_draw_overlay_on();
+     bar[0].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+     bar[0].Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
+     bar[1].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+-    bar[1].Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
++    bar[1].Transition.StateAfter = overlay ? D3D12_RESOURCE_STATE_RENDER_TARGET : D3D12_RESOURCE_STATE_PRESENT;
+     g.list->lpVtbl->ResourceBarrier(g.list, 2, bar);
++    if (overlay) {
++        rsx_live_draw_overlay_draw(g.dev, g.queue, g.list, bb, (size_t)rtv_handle(bbi).ptr, g.width, g.height);
++        bar[1].Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
++        bar[1].Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
++        g.list->lpVtbl->ResourceBarrier(g.list, 1, &bar[1]);
++    }
+ 
+     ld_flush(LD_FLUSH_PRESENT);
+     {
+@@ -10898,7 +10954,7 @@
+         HRESULT present_hr = S_OK;
+         if (!hold) {
+             last_show = show_t;
+-            present_hr = g.swap->lpVtbl->Present(g.swap, nowait ? 0 : 1, 0);
++            present_hr = g.swap->lpVtbl->Present(g.swap, nowait ? 0 : ld_sync_interval(), 0);
+         }
+         if (SUCCEEDED(present_hr))
+             ld_present_measure_record(g_ld_frames + 1u);
+--- a/libs/video/rsx_null_backend.c
++++ b/libs/video/rsx_null_backend.c
+@@ -9,6 +9,7 @@
+ #include "rsx_null_backend.h"
+ #include <stdio.h>
+ #include <string.h>
++#include <stdint.h>
+ #include "../../runtime/ps3_log.h"
+ 
+ #ifdef _WIN32
+@@ -52,8 +53,15 @@
+ 
+ static int s_present_suppressed = 0;
+ 
++/* An in-game menu of the executable (Saka port: saka_overlay.cpp) may set this; a nonzero return means the
++ * message was the menu's (F2 opens it; while it is open it takes the keyboard and the mouse, and Esc closes the
++ * menu instead of the game). */
++int (*rsx_window_message_hook)(void* hwnd, unsigned msg, uintptr_t wp, intptr_t lp) = NULL;
++
+ static LRESULT CALLBACK null_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+ {
++    if (rsx_window_message_hook && rsx_window_message_hook(hwnd, msg, (uintptr_t)wp, (intptr_t)lp))
++        return 0;
+     switch (msg) {
+     case WM_CLOSE:
+         s_state.window_closed = 1;
+--- a/libs/input/cellPad.c
++++ b/libs/input/cellPad.c
+@@ -96,6 +96,8 @@
+     u8   press_r1;
+ } PadHostState;
+ 
++int (*cellPad_overlay_hook)(unsigned port, unsigned buttons) = NULL;   /* see cellPadGetData */
++
+ static int           s_pad_initialized = 0;
+ static u32           s_max_connect = 0;
+ static u32           s_port_setting[CELL_PAD_MAX_PORT_NUM];
+@@ -1109,6 +1111,21 @@
+         data->button[CELL_PAD_BTN_OFFSET_SENSOR_Z] = 512;
+         data->button[CELL_PAD_BTN_OFFSET_SENSOR_G] = 512;
+     }
++
++    /* An in-game menu of the executable (Saka port: saka_overlay.cpp) gets the buttons the game would get (every
++     * source, PAD_FILE included) on each read; while it is open (nonzero return) the game gets a neutral pad. */
++    if (cellPad_overlay_hook) {
++        const unsigned btns = (unsigned)(data->button[CELL_PAD_BTN_OFFSET_DIGITAL1] & 0xFF) |
++                              ((unsigned)(data->button[CELL_PAD_BTN_OFFSET_DIGITAL2] & 0xFF) << 8);
++        if (cellPad_overlay_hook(port_no, btns)) {
++            data->button[CELL_PAD_BTN_OFFSET_DIGITAL1] = 0;
++            data->button[CELL_PAD_BTN_OFFSET_DIGITAL2] = 0;
++            data->button[CELL_PAD_BTN_OFFSET_ANALOG_RIGHT_X] = data->button[CELL_PAD_BTN_OFFSET_ANALOG_RIGHT_Y] = 128;
++            data->button[CELL_PAD_BTN_OFFSET_ANALOG_LEFT_X] = data->button[CELL_PAD_BTN_OFFSET_ANALOG_LEFT_Y] = 128;
++            for (int k = CELL_PAD_BTN_OFFSET_PRESS_RIGHT; k <= CELL_PAD_BTN_OFFSET_PRESS_R2; k++)
++                data->button[k] = 0;
++        }
++    }
+     }  /* end connected block */
+ 
+ emit:
+--- a/main.cpp
++++ b/main.cpp
+@@ -108,6 +108,7 @@
+ 
+ /* Host-provided symbols the runtime and the HLE libraries link against. */
+ uint8_t* vm_base = nullptr;
++extern "C" { volatile int g_saka_user_speed = 1; extern volatile int g_saka_diag_slowmo; }   /* the player's game speed: saka_overlay.cpp (F7/F8) */
+ extern uint32_t ppu_vm_size;                  /* ppu_loader.cpp: the OOB guard */
+ 
+ /* Guest-callback dispatch. g_ps3_guest_caller is the hook the HLE runtime
+@@ -1039,9 +1040,23 @@
+               else    fprintf(stderr, "[saka] boot logos: fast forward off after %.2f s\n",
+                               (double)(now - ff_t0) / (double)qpf.QuadPart);
+           } }
++        /* The player's game speed (g_saka_user_speed: F7 = x2, F8 = turbo, the F2 menu; saka_overlay.cpp): vblank
++         * ticks that much faster, and Present stops waiting for the display (every frame is still rendered). */
++        const int user_speed = g_saka_user_speed > 1 ? (g_saka_user_speed > 16 ? 16 : g_saka_user_speed) : 1;
++        { static int user_prev = 1;
++          if (user_speed != user_prev) {
++              user_prev = user_speed;
++              const int ff_now = boot_ff_factor > 1 && s_boot_ff == 1;
++              if (s_rsx_live) rsx_live_draw_set_present_nowait(user_speed > 1 || ff_now);
++              else rsx_d3d12_set_present_nowait(user_speed > 1 || turbo);
++              next_tick = now; InterlockedExchange(&s_vbt_resync, 1);
++              fprintf(stderr, "[saka] game speed x%d\n", user_speed);
++          } }
+         const long long period = (boot_ff_factor > 1 && s_boot_ff == 1) ? tick_period / boot_ff_factor
+-                               : turbo ? tick_period / turbo_factor : tick_period;
+-        s_vbt_period = period;
++                               : turbo ? tick_period / (turbo_factor > user_speed ? turbo_factor : user_speed)
++                               : tick_period / user_speed;
++        /* Diagnostic slow motion (saka_hooks.c g_saka_diag_slowmo, SAKA_BALL_DUMP_SLOW): the frame dump keeps up. */
++        { if (g_saka_diag_slowmo > 1) s_vbt_period = period * g_saka_diag_slowmo; else s_vbt_period = period; }
+ 
+         InterlockedIncrement(&g_frame_clock_beats);   /* for the freeze watchdog */
+         g_step_census_frame = cellGcm_flip_request_count();   /* PPU_STEP_CENSUS frame index */
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -188,11 +188,25 @@
+     "${PS3RECOMP_DIR}/runtime/prx/prx_loader.c")
+ message(STATUS "Lifted PRX:      ${PRX_LIFTED_SOURCES}")
+ 
++# The in-game cheat menu (F2): Dear ImGui 1.92.7 (MIT, third_party/imgui, copied from the YKTK3 port's build) drawn
++# by the live renderer. Its include directory is scoped to these sources (see the SPU note below: a target-wide
++# include would rebuild every lifted TU).
++set(SAKA_OVERLAY_SOURCES
++    saka_overlay.cpp
++    third_party/imgui/imgui.cpp
++    third_party/imgui/imgui_draw.cpp
++    third_party/imgui/imgui_tables.cpp
++    third_party/imgui/imgui_widgets.cpp
++    third_party/imgui/backends/imgui_impl_dx12.cpp)
++set_source_files_properties(${SAKA_OVERLAY_SOURCES} PROPERTIES
++    INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/third_party/imgui")
++
+ add_executable(${PROJECT_NAME}
+     main.cpp
+     stubs.cpp
+     saka_hooks.c
+     saka_l10n.cpp
++    ${SAKA_OVERLAY_SOURCES}
+     ${PS3RECOMP_SCAFFOLD}
+     ${HLE_NID_TABLE}
+     ${RECOMP_SOURCES}

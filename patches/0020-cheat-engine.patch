@@ -1,0 +1,652 @@
+--- a/saka_hooks.c
++++ b/saka_hooks.c
+@@ -311,13 +311,91 @@
+ static int ball_ahead(uint32_t obj, float v[3]);
+ /* Called at 0x0017CD88 in func_0017CB30 (ppu_recomp_004.cpp): vr29 holds the
+  * drawn position in guest byte order, gpr31 is the ball object. */
++/* SAKA_BALL_DUMP_GATE=<file> (diagnostic, 2026-11-08, owner: "센터링이나 공이 높이 띄워 졌을때 30fps"): when the
++ * drawn ball rises above SAKA_BALL_DUMP_Y (default 2.5) the file is created for 120 ticks, so LD_FRAME_DUMP_GATE
++ * pointed at it dumps those frames (at most 6 windows a run); every tick of a window is logged as [ball-hi]. */
++volatile int g_saka_diag_slowmo;   /* main.cpp: vblank period x this while > 1 (SAKA_BALL_DUMP_SLOW) */
++static void ball_high_diag(const float v[3], int moved, const float out[3])
++{
++    static int on = -1, windows, slow; static const char* gate; static float ymin; static unsigned until;
++    if (on < 0) {
++        gate = getenv("SAKA_BALL_DUMP_GATE"); on = gate && *gate;
++        const char* y = getenv("SAKA_BALL_DUMP_Y"); ymin = y ? (float)atof(y) : 2.5f;
++        const char* s = getenv("SAKA_BALL_DUMP_SLOW"); slow = s ? atoi(s) : 0;   /* game speed / n in a window */
++    }
++    if (!on) return;
++    static unsigned calls;   /* the window counts calls: one per tick at 60 ticks, one per frame at 30 */
++    calls++;
++    if (!until && windows < 6 && v[1] > ymin) {
++        FILE* f = fopen(gate, "wb"); if (f) fclose(f);
++        until = calls + 120; windows++;
++        g_saka_diag_slowmo = slow;
++        fprintf(stderr, "[ball-hi] window %d opens at tick %u\n", windows, s_logic60_tick);
++    }
++    if (!until) return;
++    fprintf(stderr, "[ball-hi] tick %u par %u pos %.2f %.2f %.2f%s drawn %.2f %.2f %.2f\n", calls,
++            s_logic60_tick & 1u, v[0], v[1], v[2], (moved & 2) ? " glide" : (moved & 1) ? " ahead" : " kept ", out[0], out[1], out[2]);
++    if (calls >= until) { remove(gate); until = 0; g_saka_diag_slowmo = 0; }
++}
++/* Ball hops (2026-11-08, owner: "예, 튀다"; SAKA_BALL_SMOOTH=0 = off). Outside free flight the drawn position is
++ * the match object's ball entity ([obj+0x3A10+4] +4..+0xC, see above), which the match only moves now and then:
++ * at 30 ticks as at 60 it stands for 2-9 match ticks and then hops 2-8 units (dribble touches, the ball after a
++ * landing; 23 of 51 such hops in a 726-frame log stood again right after, the rest began a kick). The same
++ * positions come at 30 and 60 ticks, so it is the game's own data. A hop lands exactly on the ground (y 0: 22
++ * of those 23), a kick leaves it (y 0.1-2.8 at its first step: all 25). Drawing only: after the ball stood for
++ * at least two match ticks, a hop of 1-15 units to y 0 is drawn from where the ball was drawn, the distance
++ * left shrinking to a tenth over as many calls as the ball stood (two to six match ticks), so the ball slows
++ * down like a pushed ball. When the ball moves on during a glide it shrinks faster (x0.7 a call). Kicks and
++ * longer jumps (restarts) are drawn as the game draws them. One call per tick at 60 ticks (m = 2 calls per
++ * match tick), one per frame at 30 (m = 1). */
++typedef struct { uint32_t key; float raw[3], drawn[3], off[3], f; unsigned still; int active; } ball_glide_st;
++static int ball_glide(uint32_t obj, const float raw[3], float v[3])
++{
++    static int on = -1;
++    static ball_glide_st g;
++    if (on < 0) {
++        const char* e = getenv("SAKA_BALL_SMOOTH"); on = !(e && *e == '0');
++        fprintf(stderr, "[ball] hops of the drawn ball: %s\n", on ? "glided (SAKA_BALL_SMOOTH=0 = as the game draws them)" : "as the game draws them");
++    }
++    if (!on) return 0;
++    const unsigned m = ball60_on() ? 2u : 1u;
++    if (g.key != obj) { memset(&g, 0, sizeof g); g.key = obj; memcpy(g.raw, raw, 12); memcpy(g.drawn, v, 12); return 0; }
++    const float dx = raw[0] - g.raw[0], dy = raw[1] - g.raw[1], dz = raw[2] - g.raw[2];
++    const float d = sqrtf(dx * dx + dy * dy + dz * dz);
++    if (d == 0.0f) { if (g.still < 100000u) g.still++; }
++    else {
++        if (d > 15.0f) g.active = 0;                                             /* restart or reset: at once */
++        else if (d > 1.0f && raw[1] == 0.0f && g.still >= 2u * m) {             /* a hop after two match ticks */
++            unsigned n = g.still + 1u;
++            if (n < 2u * m) n = 2u * m;
++            if (n > 6u * m) n = 6u * m;
++            g.f = powf(0.1f, 1.0f / (float)n);
++            for (int k = 0; k < 3; k++) g.off[k] = g.drawn[k] - v[k];
++            g.active = 1;
++        } else if (g.active && g.f > 0.7f) g.f = 0.7f;                          /* moving on: catch up sooner */
++        g.still = 0; memcpy(g.raw, raw, 12);
++    }
++    if (g.active) {
++        for (int k = 0; k < 3; k++) g.off[k] *= g.f;
++        if (g.off[0] * g.off[0] + g.off[1] * g.off[1] + g.off[2] * g.off[2] < 1e-4f) g.active = 0;
++    }
++    if (!g.active) { memcpy(g.drawn, v, 12); return 0; }
++    const float floor_y = fminf(v[1], 0.0f);
++    for (int k = 0; k < 3; k++) v[k] += g.off[k];
++    if (v[1] < floor_y) v[1] = floor_y;
++    memcpy(g.drawn, v, 12);
++    return 2;
++}
+ void saka_ball_vec_hook(ppu_context* ctx)
+ {
+-    if (!ball60_on()) return;
+     uint8_t* r = (uint8_t*)&ctx->vr[29];
+     float v[3];
+     for (int k = 0; k < 3; k++) { uint32_t w; memcpy(&w, r + 4 * k, 4); w = ball_bs32(w); memcpy(&v[k], &w, 4); }
+-    if (!ball_ahead((uint32_t)ctx->gpr[31], v)) return;
++    const float v0[3] = { v[0], v[1], v[2] };
++    int moved = ball60_on() ? ball_ahead((uint32_t)ctx->gpr[31], v) : 0;   /* the diagnostic also at 30 ticks */
++    moved |= ball_glide((uint32_t)ctx->gpr[31], v0, v);
++    ball_high_diag(v0, moved, v);
++    if (!moved) return;
+     for (int k = 0; k < 3; k++) { uint32_t w; memcpy(&w, &v[k], 4); w = ball_bs32(w); memcpy(r + 4 * k, &w, 4); }
+ }
+ static int ball_ahead(uint32_t obj, float v[3])
+@@ -341,6 +419,9 @@
+       } }
+     if (!ahead) { s_ball_kept++; return 0; }
+     for (int k = 0; k < 3; k++) v[k] = h->c[k] + 0.5f * d2[k];
++    /* Never below the pitch: a ball coming down lands (y 0) at the next match tick, and half a step of its fall
++     * drew it up to 1.5 below the ground for a frame (2026-11-08, [ball-hi] tick 6353: y -1.48). */
++    { const float floor_y = fminf(h->c[1], 0.0f); if (v[1] < floor_y) v[1] = floor_y; }
+     s_ball_ahead++;
+     return 1;
+ }
+@@ -790,8 +871,11 @@
+     return f;
+ }
+ 
++static void saka_cheats_start(void);   /* cheats\BLJM61064.txt (end of this file) */
+ void saka_install_syscall_hooks(void)
+ {
++    saka_cheats_start();
++    { extern void saka_overlay_install(void); saka_overlay_install(); }   /* saka_overlay.cpp: the F2 menu */
+     /* Always: the loader-step record feeds [perf] and the loader work below,
+      * not only the opt-in turbo. One lr compare per post. */
+     lv2_syscall_register(&g_lv2_syscalls, 94 /* SYS_SEMAPHORE_POST */, saka_semaphore_post);
+@@ -800,3 +884,533 @@
+     if (!e || *e != '1') return;
+     lv2_syscall_register(&g_lv2_syscalls, 141 /* SYS_TIMER_USLEEP */, saka_timer_usleep);
+ }
++
++/* ---- Cheats -----------------------------------------------------------------
++ * cheats/BLJM61064.txt: cheats in VitaCheat's code syntax with PS3 addresses (the
++ * PS Vita version's PCSG00198.psv moved over; NOTES.md "Cheats"). cheats/enabled.txt:
++ * the names of the cheats that are on, one per line (the launcher writes it). A host
++ * thread reads both files when they change (checked every second) and applies the
++ * enabled codes ten times a second, as VitaCheat does. Values are stored big-endian,
++ * the way the PS3 game reads them.
++ *   $0000 addr value      8-bit write ($0100 16-bit, $0200 32-bit)
++ *   $4T0x addr value      multi-write (T = 0/1/2: 8/16/32-bit) with the next line,
++ *   $CCCC step vstep      CCCC writes, the address +step and the value +vstep each time
++ *   $F0nn 0 0             code switch nn: a hook in the recompiled code acts while the
++ *                         cheat is on (the Vita ARM code patches, moved; see below)
++ *   $CT00 addr value      the port's own: write only if memory holds a larger value
++ *                         ($DT0x + next line: the same as a multi-write), T = 0/1/2
++ *   Lines starting with # are comments; "#@..." lines carry the launcher's metadata.
++ * Other code types are skipped, the Vita ARM code patches ($A100/$A200) among them:
++ * the game's code is recompiled, so its PPC bytes in memory are never run.
++ * Writes go only to committed guest memory. SAKA_CHEATS=0 turns the thread off. */
++static volatile uint8_t s_cheat_switch[16];   /* set by the cheat thread from the enabled $F0nn codes */
++static volatile long s_cheat_hook_calls[16];  /* calls of each switch's hook while it is on (logged by the thread) */
++#ifdef _WIN32
++typedef struct { uint8_t size, lower; uint32_t addr, value, count, step, vstep; } cheat_code;
++typedef struct { char name[128]; int first, n, on, once, done; } cheat_def;
++static cheat_code s_cheat_codes[4096];
++static cheat_def s_cheat_defs[512];
++static int s_ncheat_codes, s_ncheat_defs, s_cheat_skipped;
++static FILETIME s_cheat_time[5];
++
++static void cheat_trim(char* s)
++{
++    size_t n = strlen(s);
++    while (n && (s[n - 1] == '\n' || s[n - 1] == '\r' || s[n - 1] == ' ' || s[n - 1] == '\t'))
++        s[--n] = 0;
++}
++
++static const char* cheat_skip_space(const char* s)
++{
++    if ((unsigned char)s[0] == 0xEF && (unsigned char)s[1] == 0xBB && (unsigned char)s[2] == 0xBF)
++        s += 3;   /* UTF-8 BOM */
++    while (*s == ' ' || *s == '\t') s++;
++    return s;
++}
++
++static void cheats_load(void)
++{
++    s_ncheat_codes = s_ncheat_defs = s_cheat_skipped = 0;
++    FILE* f = fopen("cheats/BLJM61064.txt", "rb");
++    if (!f) return;
++    char line[512];
++    int multi = -1;   /* a $4 code waiting for its second line */
++    while (fgets(line, sizeof line, f)) {
++        cheat_trim(line);
++        const char* s = cheat_skip_space(line);
++        if (s[0] == '_' && s[1] == 'V' && (s[2] == '0' || s[2] == '1')) {
++            if (s_ncheat_defs >= 512) break;
++            cheat_def* c = &s_cheat_defs[s_ncheat_defs++];
++            snprintf(c->name, sizeof c->name, "%s", cheat_skip_space(s + 3));
++            c->first = s_ncheat_codes;
++            c->n = c->on = c->once = c->done = 0;
++            multi = -1;
++            continue;
++        }
++        unsigned type, a, v;
++        if (s[0] != '$' || !s_ncheat_defs || sscanf(s + 1, "%x %x %x", &type, &a, &v) != 3) continue;
++        if (multi >= 0) {
++            cheat_code* m = &s_cheat_codes[multi];
++            m->count = type; m->step = a; m->vstep = v;
++            multi = -1;
++            continue;
++        }
++        const unsigned kind = type >> 12, bits = (type >> 8) & 0xFu;
++        if (kind == 0xF && s_ncheat_codes < 4096) {   /* code switch: size 0, addr = switch number */
++            cheat_code* k = &s_cheat_codes[s_ncheat_codes++];
++            k->size = 0; k->lower = 0; k->addr = type & 0xFFu; k->value = 0; k->count = 0; k->step = k->vstep = 0;
++            s_cheat_defs[s_ncheat_defs - 1].n++;
++            continue;
++        }
++        const uint8_t size = bits == 0 ? 1 : bits == 1 ? 2 : bits == 2 ? 4 : 0;
++        /* the port's own kinds C (one write) and D (multi-write, like 4): write only where the value in memory is
++         * larger than the cheat's, so "1 week left" shortens a running construction or training and leaves an
++         * idle slot (0) alone */
++        if ((kind != 0 && kind != 4 && kind != 0xC && kind != 0xD) || !size || s_ncheat_codes >= 4096) { s_cheat_skipped++; continue; }
++        cheat_code* k = &s_cheat_codes[s_ncheat_codes++];
++        k->size = size; k->addr = a; k->value = v; k->count = 1; k->step = 0; k->vstep = 0;
++        k->lower = kind == 0xC || kind == 0xD;
++        s_cheat_defs[s_ncheat_defs - 1].n++;
++        if (kind == 4 || kind == 0xD) multi = s_ncheat_codes - 1;
++    }
++    fclose(f);
++}
++
++static void cheats_enable(void)
++{
++    for (int i = 0; i < s_ncheat_defs; i++) s_cheat_defs[i].on = 0;
++    FILE* f = fopen("cheats/enabled.txt", "rb");
++    if (!f) return;
++    char line[256];
++    while (fgets(line, sizeof line, f)) {
++        cheat_trim(line);
++        const char* s = cheat_skip_space(line);
++        for (int i = 0; *s && i < s_ncheat_defs; i++)
++            if (strcmp(s_cheat_defs[i].name, s) == 0) s_cheat_defs[i].on = 1;
++    }
++    fclose(f);
++}
++
++static int cheat_committed(uint32_t ea, uint32_t n)
++{
++    MEMORY_BASIC_INFORMATION mbi;
++    if (ea < 0x10000u || (uint64_t)ea + n > 0x40000000ull) return 0;
++    if (!VirtualQuery(vm_base + ea, &mbi, sizeof mbi) || mbi.State != MEM_COMMIT) return 0;
++    return (uint8_t*)mbi.BaseAddress + mbi.RegionSize >= vm_base + ea + n || cheat_committed(ea + n - 1, 1);
++}
++
++/* ---- Cheat engine additions (2026-11-08, owner: values, per-player edits and locks as in the YKTK3 launcher) --
++ * cheats/values.txt (the launcher writes it): "<cheat name>\t<n>\t<value>" replaces the value of the cheat's n-th
++ *   code (0-based, a multi-write counts once; decimal, or hex with 0x); "<cheat name>\tonce\t1" writes the cheat once
++ *   (when it is turned on or a value changes, and a game is loaded) instead of ten times a second (고정 off).
++ * cheats/players.txt (the launcher writes it): edits of single players by player ID, written into the user's club
++ *   roster (0x00EE2954, 23 x 0x218 bytes; the game rebuilds it there when the GM moves to another club, so the edits
++ *   follow the club and touch no other club). "<player id>\t<field>\t<value>\t<lock>": field "a<n>" ability n (0-45,
++ *   +0x0C+n, 0-100) with its experience (u16 +0x6A+2n) from the game's table 0x4D, as the game's own setter
++ *   func_005773A8 does; "l<n>" the limit of ability n (+0x3B+n, 0-100); "b<hex>"/"h<hex>"/"w<hex>" a byte/u16/u32 at
++ *   that record offset. lock 1 = ten times a second, 0 = once per file change while the player is in the roster.
++ * cheats/live/state.bin (written here every 2 s when it changed): the game state for the launcher's lists (names and
++ *   current values): "SAKA", u32 range count, then per range u32 address, u32 size, the bytes (big-endian as in
++ *   the game). Written to state.tmp and renamed over state.bin. */
++#define CHEAT_ROSTER 0x00EE2954u
++#define CHEAT_RECORD 0x218u
++typedef struct { uint32_t id; char kind; uint16_t off; uint8_t size; uint32_t value; uint8_t lock, done; } cheat_player_edit;
++static cheat_player_edit s_cheat_players[2048];
++static int s_ncheat_players;
++
++static uint32_t cheat_number(const char* s)
++{
++    return (uint32_t)strtoul(s, NULL, (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) ? 16 : 10);
++}
++
++static void cheats_values(void)
++{
++    FILE* f = fopen("cheats/values.txt", "rb");
++    if (!f) return;
++    char line[512];
++    while (fgets(line, sizeof line, f)) {
++        cheat_trim(line);
++        char* name = (char*)cheat_skip_space(line);
++        char* key = strchr(name, '\t');
++        if (!key) continue;
++        *key++ = 0;
++        char* val = strchr(key, '\t');
++        if (!val) continue;
++        *val++ = 0;
++        for (int i = 0; i < s_ncheat_defs; i++) {
++            cheat_def* d = &s_cheat_defs[i];
++            if (strcmp(d->name, name) != 0) continue;
++            if (strcmp(key, "once") == 0) { d->once = atoi(val) != 0; continue; }
++            const int n = atoi(key);
++            /* the n-th code of the cheat (codes are stored one per $ line except a multi-write's second line) */
++            if (n >= 0 && n < d->n && s_cheat_codes[d->first + n].size) s_cheat_codes[d->first + n].value = cheat_number(val);
++        }
++    }
++    fclose(f);
++}
++
++static void cheats_players_load(void)
++{
++    s_ncheat_players = 0;
++    FILE* f = fopen("cheats/players.txt", "rb");
++    if (!f) return;
++    char line[256];
++    while (fgets(line, sizeof line, f) && s_ncheat_players < 2048) {
++        cheat_trim(line);
++        const char* s = cheat_skip_space(line);
++        char field[32];
++        char value[32];
++        unsigned id, lock = 1;
++        if (sscanf(s, "%u\t%31[^\t]\t%31[^\t]\t%u", &id, field, value, &lock) < 3) continue;
++        cheat_player_edit* e = &s_cheat_players[s_ncheat_players];
++        e->id = id; e->kind = field[0]; e->value = cheat_number(value); e->lock = lock != 0; e->done = 0;
++        if (e->kind == 'a' || e->kind == 'l') {
++            const unsigned n = (unsigned)atoi(field + 1);
++            if (n >= 46) continue;
++            e->off = (uint16_t)n; e->size = 1;
++            if (e->value > 100) e->value = 100;
++        } else if (e->kind == 'b' || e->kind == 'h' || e->kind == 'w') {
++            const unsigned off = (unsigned)strtoul(field + 1, NULL, 16);
++            e->size = e->kind == 'b' ? 1 : e->kind == 'h' ? 2 : 4;
++            if (off + e->size > CHEAT_RECORD) continue;
++            e->off = (uint16_t)off;
++        } else continue;
++        s_ncheat_players++;
++    }
++    fclose(f);
++}
++
++/* A game is loaded: the user's club roster holds at least one valid player ID (0 < id < 0x46A2, or the game's
++ * three special IDs 0x7FFD-0x7FFF). Writes that happen once wait for it, so a save loaded afterwards cannot undo them. */
++static int cheat_game_loaded(void)
++{
++    if (!cheat_committed(CHEAT_ROSTER, 23 * CHEAT_RECORD)) return 0;
++    for (uint32_t k = 0; k < 23; k++) {
++        const uint32_t id = ld_be32(CHEAT_ROSTER + k * CHEAT_RECORD);
++        if ((id > 0 && id < 0x46A2u) || (id >= 0x7FFDu && id <= 0x7FFFu)) return 1;
++    }
++    return 0;
++}
++
++/* The game's experience table (master table 0x4D: u16 per ability value), read the way func_004CA698 does. */
++static uint32_t cheat_ability_exp(uint32_t v)
++{
++    if (!cheat_committed(0x008D4A9Cu + 0x4Du * 4u, 4)) return 0xFFFFFFFFu;
++    const uint32_t hdr = ld_be32(0x008D4A9Cu + 0x4Du * 4u);
++    if (!hdr || !cheat_committed(hdr, 8)) return 0xFFFFFFFFu;
++    const uint32_t data = ld_be32(hdr + 4);
++    if (!data || !cheat_committed(data + 2 * v, 2)) return 0xFFFFFFFFu;
++    return ((uint32_t)vm_base[data + 2 * v] << 8) | vm_base[data + 2 * v + 1];
++}
++
++static void cheats_players_apply(int loaded)
++{
++    if (!loaded || !s_ncheat_players) return;
++    for (int i = 0; i < s_ncheat_players; i++) {
++        cheat_player_edit* e = &s_cheat_players[i];
++        if (!e->lock && e->done) continue;
++        for (uint32_t k = 0; k < 23; k++) {
++            const uint32_t rec = CHEAT_ROSTER + k * CHEAT_RECORD;
++            if (ld_be32(rec) != e->id) continue;
++            uint8_t* p = vm_base + rec;
++            if (e->kind == 'a') {
++                const uint32_t exp = cheat_ability_exp(e->value);
++                p[0x0C + e->off] = (uint8_t)e->value;
++                if (exp != 0xFFFFFFFFu) { p[0x6A + 2 * e->off] = (uint8_t)(exp >> 8); p[0x6B + 2 * e->off] = (uint8_t)exp; }
++            } else if (e->kind == 'l') {
++                p[0x3B + e->off] = (uint8_t)e->value;
++            } else if (e->size == 1) {
++                p[e->off] = (uint8_t)e->value;
++            } else if (e->size == 2) {
++                p[e->off] = (uint8_t)(e->value >> 8); p[e->off + 1] = (uint8_t)e->value;
++            } else {
++                st_be32(rec + e->off, e->value);
++            }
++            e->done = 1;
++            break;
++        }
++    }
++}
++
++/* cheats/lists.txt (the launcher writes it): "<list>\t<slot>\t<id>\t<lock>" puts an ID into one of the game's
++ * candidate lists, lock 1 = ten times a second (the game redraws the lists), 0 = once per file change:
++ *   coach  the staff candidates, 4 x 0xC at 0x00EE72A4 (u32 staff ID 1-825, func_00528FD8 / func_00532EA0)
++ *   scout  the scout candidates, 4 x 0xC at 0x00EE72D4 (u32 scout ID 1-427; the game shows 3, or 4 with a bonus)
++ *   euro   the overseas (European) player list, 20 x 0x14 at 0x00EE70E8 (u32 player ID, func_0052E190). A player of
++ *          that list needs a status record in the 500 x 0xC table at 0x00F0C4B8 (func_004CB098): the record of the
++ *          player who was in the slot is handed over (its other fields kept), as the Vita cheat did, or a free one. */
++typedef struct { char list; uint8_t slot, lock, done; uint32_t id; } cheat_list_edit;
++static cheat_list_edit s_cheat_lists[64];
++static int s_ncheat_lists;
++
++static void cheats_lists_load(void)
++{
++    s_ncheat_lists = 0;
++    FILE* f = fopen("cheats/lists.txt", "rb");
++    if (!f) return;
++    char line[256];
++    while (fgets(line, sizeof line, f) && s_ncheat_lists < 64) {
++        cheat_trim(line);
++        char list[16];
++        unsigned slot, id, lock = 1;
++        if (sscanf(cheat_skip_space(line), "%15[^\t]\t%u\t%u\t%u", list, &slot, &id, &lock) < 3) continue;
++        const char c = strcmp(list, "coach") == 0 ? 'c' : strcmp(list, "scout") == 0 ? 's' : strcmp(list, "euro") == 0 ? 'e' : 0;
++        if (!c || slot >= (c == 'e' ? 20u : 4u)) continue;
++        if ((c == 'c' && (id == 0 || id >= 0x33Au)) || (c == 's' && (id == 0 || id >= 0x1ACu)) || (c == 'e' && (id == 0 || id >= 0x46A2u))) continue;
++        cheat_list_edit* e = &s_cheat_lists[s_ncheat_lists++];
++        e->list = c; e->slot = (uint8_t)slot; e->id = id; e->lock = lock != 0; e->done = 0;
++    }
++    fclose(f);
++}
++
++static void cheats_lists_apply(int loaded)
++{
++    if (!loaded || !s_ncheat_lists || !cheat_committed(0x00F0C4B8u, 500u * 0xCu)) return;
++    for (int i = 0; i < s_ncheat_lists; i++) {
++        cheat_list_edit* e = &s_cheat_lists[i];
++        if (!e->lock && e->done) continue;
++        e->done = 1;
++        if (e->list != 'e') {
++            const uint32_t ea = (e->list == 'c' ? 0x00EE72A4u : 0x00EE72D4u) + 0xCu * e->slot;
++            if (ld_be32(ea) != e->id) st_be32(ea, e->id);
++            continue;
++        }
++        const uint32_t ea = 0x00EE70E8u + 0x14u * e->slot;
++        const uint32_t old = ld_be32(ea);
++        if (old == e->id) continue;
++        int have = -1, from = -1, free_ = -1;
++        for (int r = 0; r < 500; r++) {
++            const uint32_t id = ld_be32(0x00F0C4B8u + 0xCu * (uint32_t)r);
++            if (id == e->id) have = r;
++            else if (old && id == old && from < 0) from = r;
++            else if (id == 0 && free_ < 0) free_ = r;
++        }
++        if (have < 0) {
++            const int r = from >= 0 ? from : free_;
++            if (r < 0) continue;   /* no record to give the player: leave the list as it is */
++            st_be32(0x00F0C4B8u + 0xCu * (uint32_t)r, e->id);
++        }
++        st_be32(ea, e->id);
++    }
++}
++
++static void cheats_export(int loaded)
++{
++    static const uint32_t ranges[][2] = {
++        { 0x00EE2700u, 0x0000B900u },   /* game state: money, the user's club and roster, training, facilities, lists */
++        { 0x00F0C4B8u, 500u * 0xCu },   /* the overseas players' status records (func_004CB098) */
++        { 0x00F8E030u, 0x00000120u },   /* club affinity, one byte per club */
++        { 0x00F8CE28u, 17u * 0xFCu },   /* the GM: current style, then 17 style records (+0xF4 bit 0 = unlocked) */
++    };
++    static uint8_t* last;
++    static size_t last_size;
++    if (!loaded) return;
++    size_t size = 8;
++    for (size_t r = 0; r < sizeof ranges / sizeof ranges[0]; r++) size += 8 + ranges[r][1];
++    uint8_t* buf = (uint8_t*)malloc(size);
++    if (!buf) return;
++    memcpy(buf, "SAKA", 4);
++    const uint32_t n = (uint32_t)(sizeof ranges / sizeof ranges[0]);
++    memcpy(buf + 4, &n, 4);
++    size_t at = 8;
++    for (size_t r = 0; r < n; r++) {
++        memcpy(buf + at, &ranges[r][0], 4); memcpy(buf + at + 4, &ranges[r][1], 4);
++        if (cheat_committed(ranges[r][0], ranges[r][1])) memcpy(buf + at + 8, vm_base + ranges[r][0], ranges[r][1]);
++        else memset(buf + at + 8, 0, ranges[r][1]);
++        at += 8 + ranges[r][1];
++    }
++    if (last && last_size == size && memcmp(last, buf, size) == 0) { free(buf); return; }
++    CreateDirectoryA("cheats/live", NULL);
++    FILE* f = fopen("cheats/live/state.tmp", "wb");
++    if (f) {
++        const int ok = fwrite(buf, 1, size, f) == size;
++        fclose(f);
++        if (ok) MoveFileExA("cheats/live/state.tmp", "cheats/live/state.bin", MOVEFILE_REPLACE_EXISTING);
++    }
++    free(last);
++    last = buf;
++    last_size = size;
++}
++
++static void cheats_apply(void)
++{
++    uint8_t sw[16] = { 0 };
++    for (int i = 0; i < s_ncheat_defs; i++)
++        if (s_cheat_defs[i].on)
++            for (int c = s_cheat_defs[i].first; c < s_cheat_defs[i].first + s_cheat_defs[i].n; c++)
++                if (s_cheat_codes[c].size == 0 && s_cheat_codes[c].addr < 16) sw[s_cheat_codes[c].addr] = 1;
++    for (int i = 0; i < 16; i++) s_cheat_switch[i] = sw[i];
++    int loaded = -1;
++    for (int i = 0; i < s_ncheat_defs; i++) {
++        if (!s_cheat_defs[i].on) continue;
++        if (s_cheat_defs[i].once) {
++            if (s_cheat_defs[i].done) continue;
++            if (loaded < 0) loaded = cheat_game_loaded();
++            if (!loaded) continue;
++            s_cheat_defs[i].done = 1;
++        }
++        for (int c = s_cheat_defs[i].first; c < s_cheat_defs[i].first + s_cheat_defs[i].n; c++) {
++            const cheat_code* k = &s_cheat_codes[c];
++            const uint32_t span = k->count ? (k->count - 1) * k->step + k->size : 0;
++            if (!k->count || !cheat_committed(k->addr, span)) continue;
++            uint32_t ea = k->addr, v = k->value;
++            for (uint32_t j = 0; j < k->count; j++, ea += k->step, v += k->vstep) {
++                uint8_t* p = vm_base + ea;
++                if (k->lower) {
++                    const uint32_t cur = k->size == 1 ? p[0] : k->size == 2 ? ((uint32_t)p[0] << 8 | p[1]) : ld_be32(ea);
++                    if (cur <= v) continue;
++                }
++                if (k->size == 1) p[0] = (uint8_t)v;
++                else if (k->size == 2) { p[0] = (uint8_t)(v >> 8); p[1] = (uint8_t)v; }
++                else { p[0] = (uint8_t)(v >> 24); p[1] = (uint8_t)(v >> 16); p[2] = (uint8_t)(v >> 8); p[3] = (uint8_t)v; }
++            }
++        }
++    }
++}
++
++static int cheat_file_changed(const char* path, FILETIME* last)
++{
++    WIN32_FILE_ATTRIBUTE_DATA a;
++    FILETIME t = { 0, 0 };
++    if (GetFileAttributesExA(path, GetFileExInfoStandard, &a)) t = a.ftLastWriteTime;
++    if (CompareFileTime(&t, last) == 0) return 0;
++    *last = t;
++    return 1;
++}
++
++static DWORD WINAPI cheat_thread(LPVOID arg)
++{
++    (void)arg;
++    for (unsigned tick = 0;; tick++) {
++        Sleep(100);
++        if (!vm_base) continue;
++        if (tick % 10 == 0) {
++            const int a = cheat_file_changed("cheats/BLJM61064.txt", &s_cheat_time[0]);
++            const int b = cheat_file_changed("cheats/enabled.txt", &s_cheat_time[1]);
++            const int c = cheat_file_changed("cheats/values.txt", &s_cheat_time[2]);
++            if (a || b || c) {
++                cheats_load();
++                cheats_enable();
++                cheats_values();
++                int on = 0, once = 0;
++                for (int i = 0; i < s_ncheat_defs; i++) { on += s_cheat_defs[i].on; once += s_cheat_defs[i].on && s_cheat_defs[i].once; }
++                if (s_ncheat_defs)
++                    fprintf(stderr, "[cheats] %d cheats, %d on (%d once); %d codes, %d skipped (not data writes)\n",
++                            s_ncheat_defs, on, once, s_ncheat_codes, s_cheat_skipped);
++            }
++            if (cheat_file_changed("cheats/players.txt", &s_cheat_time[3])) {
++                cheats_players_load();
++                fprintf(stderr, "[cheats] %d player edits\n", s_ncheat_players);
++            }
++            if (cheat_file_changed("cheats/lists.txt", &s_cheat_time[4])) {
++                cheats_lists_load();
++                fprintf(stderr, "[cheats] %d list edits\n", s_ncheat_lists);
++            }
++        }
++        cheats_apply();
++        if (s_ncheat_players || s_ncheat_lists || tick % 20 == 0) {
++            const int loaded = cheat_game_loaded();
++            cheats_players_apply(loaded);
++            cheats_lists_apply(loaded);
++            if (tick % 20 == 0) cheats_export(loaded);
++        }
++        static long shown[16];
++        if (tick % 100 == 0 && memcmp(shown, (const void*)s_cheat_hook_calls, sizeof shown) != 0) {
++            for (int i = 0; i < 16; i++) shown[i] = s_cheat_hook_calls[i];
++            fprintf(stderr, "[cheats] code switches used: youth visit %ld, trade chance %ld, foreign slots %ld, "
++                            "hizo roll %ld, facility check %ld, facility 1 week %ld, edit points %ld, substitution %ld\n",
++                    shown[1], shown[2], shown[3], shown[4], shown[5], shown[6], shown[7], shown[8]);
++        }
++    }
++    return 0;
++}
++
++static void saka_cheats_start(void)
++{
++    const char* e = getenv("SAKA_CHEATS");
++    if (e && *e == '0') return;
++    HANDLE t = CreateThread(NULL, 0, cheat_thread, NULL, 0, NULL);
++    if (t) CloseHandle(t);
++}
++#else
++static void saka_cheats_start(void) {}
++#endif
++
++/* ---- Code switches: the Vita ARM code patches of PCSG00198.psv, moved ---------
++ * Found in the PS3 EBOOT with REA's Ghidra (NOTES.md "Cheats", code switches); each
++ * hook is called from the recompiled function named and acts only while its $F0nn
++ * code is on.
++ * 1 WAKATE MUST FIND: func_0053557C sets up the scout's visit to a young player:
++ *   the chance (byte r29+0x29F = 0x00F8EEE3, from the area table) is rolled up to
++ *   twice against rand(1,100). Hook at 0x0053570C, after the chance is stored and
++ *   before the roll (which reads it from memory): chance 100.
++ * 2 TRADE MUST: func_0051F148 returns the reasons a club refuses to deal for a
++ *   player (bits 0-3 club and country, 4-10 flags from the player's record);
++ *   func_0051F2B4 the acceptance chance, rolled as rand % 100 < chance
++ *   (func_00520338). Hooks at their epilogues: no player-record reasons; chance 100.
++ * 3 FOREIGN PLAYER FRAME OVER: func_00584388 writes a club's free foreign-player
++ *   slots and free special (Asian) slots (limit - count over the 23 roster slots).
++ *   For the user's club (func_0049578C != 0, noted after that call) both become at
++ *   least 23. Other clubs keep their limits. */
++void saka_youth_find_hook(ppu_context* ctx)
++{
++    if (s_cheat_switch[1]) { vm_base[(uint32_t)ctx->gpr[29] + 0x29Fu] = 100; s_cheat_hook_calls[1]++; }
++}
++void saka_trade_reasons_hook(ppu_context* ctx)
++{
++    if (s_cheat_switch[2]) ctx->gpr[3] &= 0xFull;
++}
++void saka_trade_chance_hook(ppu_context* ctx)
++{
++    if (s_cheat_switch[2]) { ctx->gpr[3] = 100; s_cheat_hook_calls[2]++; }
++}
++static int s_foreign_mine;
++void saka_foreign_note(ppu_context* ctx)
++{
++    s_foreign_mine = (int32_t)ctx->gpr[3] != 0;
++}
++void saka_foreign_hook(ppu_context* ctx)
++{
++    if (!s_cheat_switch[3] || !s_foreign_mine) return;
++    s_cheat_hook_calls[3]++;
++    for (int k = 0; k < 2; k++) {
++        const uint32_t ea = (uint32_t)ctx->gpr[29 + k];
++        if ((int32_t)ld_be32(ea) < 23) st_be32(ea, 23);
++    }
++}
++
++/* 4 HIZO TRAINING SUCCESS (the port's own): func_00567A2C (new trait) and func_00567B74 (new skill) roll
++ *   rand(0,99) against the cumulative chances of the training's three outcomes; a roll above them all gives nothing
++ *   (func_005177A0, the weekly update, calls them when a 秘蔵っ子 training ends). Hook after the roll: 1, so the
++ *   first outcome with a chance is taken. It can still come out empty when the player already has that outcome.
++ *   SP training (特別練習) has no such roll: its weekly ability experience and the awakening points at the end
++ *   follow from the player (func_00515B80), so there is nothing to force there.
++ * 5 FACILITY ANY (the port's own): func_0054F92C tells the menu and func_0054220C whether a clubhouse facility
++ *   (27 slots at 0x00EE7C06, 6 bytes: id, -, u16 weeks left) can be built: 0 built already, 1 over the clubhouse's
++ *   capacity (the facilities' sizes, master table 0x2B +0xA, against the clubhouse level's capacity: the "cost"),
++ *   2 not enough money, 3 clubhouse level too low, 4/5 can. Hook at its return: 1 and 3 become 4.
++ * 6 FACILITY 1 WEEK (the port's own): func_0054220C stores the build time (master +9, x2 weeks) at slot +2. Hook
++ *   after the store: 1 week. */
++void saka_hizo_roll_hook(ppu_context* ctx)
++{
++    if (s_cheat_switch[4]) { ctx->gpr[3] = 1; s_cheat_hook_calls[4]++; }
++}
++void saka_facility_check_hook(ppu_context* ctx)
++{
++    if (!s_cheat_switch[5]) return;
++    const int32_t r = (int32_t)ctx->gpr[3];
++    if (r == 1 || r == 3) { ctx->gpr[3] = 4; s_cheat_hook_calls[5]++; }
++}
++/* 7 EDIT 99 (Vita "EDIT 99", a heap byte there): the edit-player menu object (heap) keeps its points at +0x8A8;
++ *   func_003CB8E8 starts them at 50 (0x32) and func_003CAD38 adds the slot bonus (+0x8AC) and caps the sum at 99,
++ *   the game's own maximum. Hook after the 50 is stored: 99. */
++void saka_edit_points_hook(ppu_context* ctx)
++{
++    if (s_cheat_switch[7]) { st_be32((uint32_t)ctx->gpr[29] + 0x8A8u, 99); s_cheat_hook_calls[7]++; }
++}
++void saka_facility_build_hook(ppu_context* ctx)
++{
++    if (!s_cheat_switch[6]) return;
++    const uint32_t ea = (uint32_t)ctx->gpr[27] + 2u;
++    if (((vm_base[ea] << 8) | vm_base[ea + 1]) > 1) { vm_base[ea] = 0; vm_base[ea + 1] = 1; s_cheat_hook_calls[6]++; }
++}

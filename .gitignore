@@ -1,0 +1,29 @@
+game/
+build/
+out/
+recompiled/
+generated/
+.venv/
+logs/
+*.log
+third_party/SDL2/
+spu_capture/
+shader_cache_d3d12/
+build-release/
+__pycache__/
+*.exe
+scratch/
+
+# The player's own game data, saves and settings (never in the repository)
+gamedata/
+launcher.ini
+cheats/enabled.txt
+cheats/values.txt
+cheats/players.txt
+cheats/lists.txt
+cheats/live/
+
+# Generated from the player's own EBOOT and firmware, or analysis of them (bring your own disc)
+prx_src/
+spu_jobs/*.elf
+re/

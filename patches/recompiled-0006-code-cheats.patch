@@ -1,0 +1,146 @@
+--- a/recompiled/ppu_recomp_011.cpp
++++ b/recompiled/ppu_recomp_011.cpp
+@@ -1574,6 +1574,7 @@
+         return;
+ }
+ 
++extern "C" void saka_edit_points_hook(ppu_context* ctx);
+ void func_003CB8E8(ppu_context* ctx) {
+     PPU_MM_SNAP
+         uint64_t _cs_29 = ctx->gpr[29];
+@@ -1597,6 +1598,7 @@
+         ctx->gpr[3] = vm_read32(ctx->gpr[29] + 0x4);
+         ctx->gpr[5] = vm_read32(ctx->gpr[29] + 0x94);
+         vm_write32(ctx->gpr[29] + 0x8A8, ctx->gpr[4]);
++        saka_edit_points_hook(ctx);
+         ctx->gpr[4] = ctx->gpr[5] | 0x0;
+         ctx->lr = 0x003CB938; func_0064BB08(ctx); DRAIN_TRAMPOLINE(ctx);
+         ctx->gpr[4] = vm_read32(ctx->gpr[29] + 0x8A8);
+--- a/recompiled/ppu_recomp_014.cpp
++++ b/recompiled/ppu_recomp_014.cpp
+@@ -95071,6 +95071,8 @@
+         return;
+ }
+ 
++extern "C" void saka_trade_reasons_hook(ppu_context* ctx);   /* saka_hooks.c: cheat TRADE MUST */
++extern "C" void saka_trade_chance_hook(ppu_context* ctx);
+ void func_0051F148(ppu_context* ctx) {
+     PPU_MM_SNAP
+         uint64_t _cs_29 = ctx->gpr[29];
+@@ -95161,6 +95163,7 @@
+ loc_0051F264:
+         ctx->gpr[3] = ctx->gpr[30] | 0x0;
+ loc_0051F268:
++        saka_trade_reasons_hook(ctx);   /* cheat: no refusal reasons from the player record (bits 4-10) */
+         ctx->gpr[0] = vm_read64(ctx->gpr[1] + 0xA0);
+         ctx->lr = ctx->gpr[0];
+         ctx->gpr[29] = _cs_29;
+@@ -95394,6 +95397,7 @@
+ loc_0051F574:
+         ctx->gpr[3] = ctx->gpr[24] | 0x0;
+ loc_0051F578:
++        saka_trade_chance_hook(ctx);   /* cheat: acceptance chance 100 */
+         ctx->gpr[0] = vm_read64(ctx->gpr[1] + 0xE0);
+         ctx->lr = ctx->gpr[0];
+         ctx->gpr[21] = _cs_21;
+--- a/recompiled/ppu_recomp_015.cpp
++++ b/recompiled/ppu_recomp_015.cpp
+@@ -21334,6 +21334,7 @@
+         return;
+ }
+ 
++extern "C" void saka_youth_find_hook(ppu_context* ctx);   /* saka_hooks.c: cheat WAKATE MUST FIND */
+ void func_0053557C(ppu_context* ctx) {
+     PPU_MM_SNAP
+         uint64_t _cs_26 = ctx->gpr[26];
+@@ -21447,6 +21448,7 @@
+         { uint64_t result = ctx->gpr[27] + ctx->gpr[3]; ctx->xer = (ctx->xer & ~(1u << 29)) | ((result < ctx->gpr[27]) ? (1u << 29) : 0); ctx->gpr[3] = result; }
+         vm_write8(ctx->gpr[29] + 0x29F, ctx->gpr[3]);
+ loc_0053570C:
++        saka_youth_find_hook(ctx);   /* cheat: the visit's chance (r29+0x29F) = 100 */
+         ctx->gpr[28] = (int64_t)(int32_t)(2);
+         ctx->gpr[3] = (int64_t)(int32_t)(0x77);
+         ctx->gpr[27] = ctx->gpr[28] | 0x0;
+@@ -36235,6 +36237,7 @@
+         return;
+ }
+ 
++extern "C" void saka_facility_build_hook(ppu_context* ctx);
+ void func_0054220C(ppu_context* ctx) {
+     PPU_MM_SNAP
+         uint64_t _cs_27 = ctx->gpr[27];
+@@ -36289,6 +36292,7 @@
+         ctx->gpr[3] = vm_read8(ctx->gpr[3] + 0x9);
+         ctx->gpr[3] = ppc_rlw64(ctx->gpr[3], 1, 0, 30, 0, 0);
+         vm_write16(ctx->gpr[27] + 0x2, ctx->gpr[3]);
++        saka_facility_build_hook(ctx);
+         goto loc_005422D0;
+ loc_005422C0:
+         { uint64_t _a = ctx->gpr[5]; uint64_t _r = _a + (uint64_t)(int64_t)(1); ctx->gpr[5] = _r; ctx->xer = (ctx->xer & ~(1u << 29)) | ((_r < _a) ? (1u << 29) : 0u); }
+@@ -52222,6 +52226,7 @@
+         return;
+ }
+ 
++extern "C" void saka_facility_check_hook(ppu_context* ctx);
+ void func_0054F92C(ppu_context* ctx) {
+     PPU_MM_SNAP
+         uint64_t _cs_28 = ctx->gpr[28];
+@@ -52771,6 +52776,7 @@
+         ctx->gpr[31] = (int64_t)(int32_t)(2);
+ loc_00550014:
+         ctx->gpr[3] = ctx->gpr[31] | 0x0;
++        saka_facility_check_hook(ctx);
+         ctx->gpr[0] = vm_read64(ctx->gpr[1] + 0xA0);
+         ctx->lr = ctx->gpr[0];
+         ctx->gpr[28] = _cs_28;
+@@ -83097,6 +83103,7 @@
+         return;
+ }
+ 
++extern "C" void saka_hizo_roll_hook(ppu_context* ctx);
+ void func_00567A2C(ppu_context* ctx) {
+     PPU_MM_SNAP
+         uint64_t _cs_29 = ctx->gpr[29];
+@@ -83140,6 +83147,7 @@
+         ctx->gpr[3] = (int64_t)(int32_t)(0);
+         ctx->gpr[4] = (int64_t)(int32_t)(0x63);
+         ctx->lr = 0x00567AB8; func_00593490(ctx); DRAIN_TRAMPOLINE(ctx);
++        saka_hizo_roll_hook(ctx);
+         ctx->gpr[7] = (int64_t)(int32_t)(0);
+         ctx->gpr[5] = vm_read32(ctx->gpr[31] + 0x0);
+         ctx->gpr[6] = ctx->gpr[1] | 0x0;
+@@ -83240,6 +83248,7 @@
+         ctx->gpr[3] = (int64_t)(int32_t)(0);
+         ctx->gpr[4] = (int64_t)(int32_t)(0x63);
+         ctx->lr = 0x00567C00; func_00593490(ctx); DRAIN_TRAMPOLINE(ctx);
++        saka_hizo_roll_hook(ctx);
+         ctx->gpr[7] = (int64_t)(int32_t)(0);
+         ctx->gpr[5] = vm_read8(ctx->gpr[30] + 0x10A);
+         ctx->gpr[6] = ctx->gpr[1] | 0x0;
+--- a/recompiled/ppu_recomp_016.cpp
++++ b/recompiled/ppu_recomp_016.cpp
+@@ -16797,6 +16797,8 @@
+         return;
+ }
+ 
++extern "C" void saka_foreign_note(ppu_context* ctx);   /* saka_hooks.c: cheat FOREIGN PLAYER FRAME OVER */
++extern "C" void saka_foreign_hook(ppu_context* ctx);
+ void func_00584388(ppu_context* ctx) {
+     PPU_MM_SNAP
+         uint64_t _cs_25 = ctx->gpr[25];
+@@ -16823,6 +16825,7 @@
+         vm_write64(ctx->gpr[1] + 0x78, ctx->gpr[25]);
+         ctx->gpr[28] = (int64_t)(int32_t)(0);
+         ctx->lr = 0x005843CC; func_0049578C(ctx); DRAIN_TRAMPOLINE(ctx);
++        saka_foreign_note(ctx);   /* cheat: r3 != 0 = the user's club */
+         { int64_t a = (int32_t)ctx->gpr[3]; int64_t b = (int64_t)0; uint32_t cr_val = ((a < b) ? 8 : (a > b) ? 4 : 2) | ((ctx->xer >> 31) & 1u); ctx->cr = (ctx->cr & ~(0xFu << 28)) | (cr_val << 28); }
+         if (((ctx->cr >> 29) & 1)) goto loc_00584490;
+         { uint64_t _a = ctx->gpr[1]; uint64_t _r = _a + (uint64_t)(int64_t)(0x70); ctx->gpr[3] = _r; ctx->xer = (ctx->xer & ~(1u << 29)) | ((_r < _a) ? (1u << 29) : 0u); }
+@@ -16990,6 +16993,7 @@
+         { uint64_t result = ~ctx->gpr[28] + ctx->gpr[4] + 1; ctx->xer = (ctx->xer & ~(1u << 29)) | ((ctx->gpr[4] >= ctx->gpr[28]) ? (1u << 29) : 0); ctx->gpr[4] = result; }
+         vm_write32(ctx->gpr[29] + 0x0, ctx->gpr[3]);
+         vm_write32(ctx->gpr[30] + 0x0, ctx->gpr[4]);
++        saka_foreign_hook(ctx);   /* cheat: the user's club's free foreign slots (r29, r30) */
+         ctx->gpr[0] = vm_read64(ctx->gpr[1] + 0xC0);
+         ctx->lr = ctx->gpr[0];
+         ctx->gpr[25] = _cs_25;

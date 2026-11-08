@@ -1,0 +1,66 @@
+diff --git a/libs/video/rsx_live_draw.c b/libs/video/rsx_live_draw.c
+index 8134f70..1282db6 100644
+--- a/libs/video/rsx_live_draw.c
++++ b/libs/video/rsx_live_draw.c
+@@ -56,6 +56,7 @@ u32  rsx_live_draw_get_frames(void) { return 0; }
+ void* rsx_live_draw_get_present_thread_handle(void) { return NULL; }
+ u32  rsx_live_draw_get_last_draws(void) { return 0; }
+ unsigned long long rsx_live_draw_fence_wait_us(unsigned* w) { if (w) *w = 0; return 0; }
++void rsx_live_draw_set_present_nowait(int on) { (void)on; }
+ double rsx_live_draw_get_present_fps(void) { return 0.0; }
+ void rsx_live_draw_dump_present_samples(void) {}
+ void rsx_live_draw_a010_probe_begin(void) {}
+@@ -586,6 +587,8 @@ static u64 g_ld_present_total = 0;
+ static LONGLONG g_ld_qpc_frequency = 0;
+ static int g_ld_present_dumped = 0;
+ static LONGLONG ld_slow_qpc(void);                 /* defined with ld_slow_note */
++static volatile int g_ld_present_nowait = 0;       /* fast-forward: no vsync, show <= ~60/s */
++void rsx_live_draw_set_present_nowait(int on) { g_ld_present_nowait = on ? 1 : 0; }
+ static unsigned long long g_ld_fence_wait_us = 0;  /* GPU fence waits in flushes */
+ static unsigned g_ld_fence_waits = 0;
+ static int g_ld_schedule_diag = 0;
+@@ -9639,7 +9642,20 @@ void rsx_live_draw_present(u32 buffer_id)
+ 
+     ld_flush(LD_FLUSH_PRESENT);
+     {
+-        const HRESULT present_hr = g.swap->lpVtbl->Present(g.swap, 1, 0);
++        /* Fast-forward (rsx_live_draw_set_present_nowait): every frame is still
++         * rendered, but shown at most every ~16 ms and without the vsync wait,
++         * so a frame-locked screen can run many times faster than the display. */
++        static LARGE_INTEGER last_show, show_qf;
++        LARGE_INTEGER show_t; QueryPerformanceCounter(&show_t);
++        if (!show_qf.QuadPart) QueryPerformanceFrequency(&show_qf);
++        const int nowait = g_ld_present_nowait;
++        const int hold = nowait && last_show.QuadPart &&
++                         (show_t.QuadPart - last_show.QuadPart) * 60 < show_qf.QuadPart;
++        HRESULT present_hr = S_OK;
++        if (!hold) {
++            last_show = show_t;
++            present_hr = g.swap->lpVtbl->Present(g.swap, nowait ? 0 : 1, 0);
++        }
+         if (SUCCEEDED(present_hr))
+             ld_present_measure_record(g_ld_frames + 1u);
+         else {
+diff --git a/runtime/ppu/ppu_fs.cpp b/runtime/ppu/ppu_fs.cpp
+index c123080..13ebfa7 100644
+--- a/runtime/ppu/ppu_fs.cpp
++++ b/runtime/ppu/ppu_fs.cpp
+@@ -28,6 +28,10 @@
+ #include <atomic>
+ 
+ extern "C" unsigned long long ps3_qpc_us(void);   /* [fs] open timestamps */
++/* Called with the guest path after every successful cellFsOpen; a port sets it
++ * to react to the files that mark a screen (Sakatsuku: the boot-logo fast
++ * forward). Null by default. */
++extern "C" { void (*g_ppu_fs_open_hook)(const char* guest_path) = nullptr; }
+ #include <sys/stat.h>
+ #include "../platform/win32_dirent.h"   /* <dirent.h>, or a Win32 stand-in */
+ 
+@@ -327,6 +331,7 @@ static void cellFsOpen(ppu_context* ctx)
+      * movies) is diagnosed from the opener: its sibling read path is the one
+      * that is not running. */
+     if (fd >= 0 && fd < FS_MAX) { strncpy(g_fd_path[fd], gpath, sizeof g_fd_path[fd]-1); g_fd_path[fd][sizeof g_fd_path[fd]-1]=0; }
++    if (g_ppu_fs_open_hook) g_ppu_fs_open_hook(gpath);   /* a port reacting to screen markers */
+     { char who[64] = "?";
+       if (getenv("FS_CALLER")) { ppu_guest_caller(who, sizeof who);
+           fprintf(stderr, "[fs] open '%s' -> fd %d  (opened by %s)\n", gpath, fd, who);

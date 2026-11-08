@@ -1,0 +1,563 @@
+--- a/libs/video/rsx_live_draw.c
++++ b/libs/video/rsx_live_draw.c
+@@ -48,6 +48,7 @@
+   (void)x; (void)y; (void)w; (void)h; return 0; }
+ void rsx_live_draw_note_resolve(u32 sl, u32 sa, u32 dl, u32 da)
+ { (void)sl; (void)sa; (void)dl; (void)da; }
++int  rsx_live_draw_is_gpu_depth(u32 l, u32 a) { (void)l; (void)a; return 0; }
+ void rsx_live_draw_flush(void) {}
+ void rsx_live_draw_present(u32 b) { (void)b; }
+ void rsx_live_draw_set_movie_mode(int on) { (void)on; }
+@@ -246,6 +247,7 @@
+     u64 depth_write_draws;
+     u64 depth_both_draws;
+     int reject_logged;
++    u32 last_bind_frame;      /* g_ld_frames when a pass last bound it (rsx_live_draw_is_gpu_depth) */
+ } zdepth_t;
+ typedef struct {
+     u32 location, offset, format, width, height, pitch, remap;
+@@ -254,6 +256,8 @@
+     u64 content_hash;
+     u32 last_hash_frame;
+     u64 last_use_serial;
++    u32 ww_gen;               /* write-watch generation of the last hash, 0 = unknown (ld_ww_*) */
++    u32 ww_skips;             /* hashes skipped since the last full hash (safety net at 128) */
+ } texcache_t;
+ typedef struct {
+     u32 location, offset, format, width, height, pitch;
+@@ -398,6 +402,55 @@
+ 
+ static ld_state g;
+ 
++/* Frame pipelining (LD_PIPELINE, default on; LD_PIPELINE=0 = the old
++ * synchronous present). The present used to submit the frame and then wait
++ * for the GPU to finish it (~4 ms a frame in a match) before the next frame
++ * could be recorded. With two frame contexts -- command allocator, transient
++ * rings and shader-visible descriptor heaps each -- the present only submits;
++ * the next frame records into the other context while the GPU draws this one,
++ * and the wait moves to the reuse of a context one frame later. Resources
++ * retired during a frame are released once that frame's fence has passed.
++ * Every other flush (ring overflow, readback, guest reference, movie) still
++ * waits for the whole queue, exactly as before. g.* always holds the current
++ * context's objects, so the draw code is unchanged. */
++#define LD_FRAME_CTX 2
++typedef struct {
++    ID3D12CommandAllocator* alloc;
++    ID3D12Resource *upload, *vb, *ib, *cb, *ps_cb;
++    u8 *upload_mapped, *vb_mapped, *cb_mapped, *ps_cb_mapped;
++    u32* ib_mapped;
++    ID3D12DescriptorHeap *srv_heap, *smp_heap;
++    u64 fence;                                   /* this context's last submit */
++    ID3D12Resource* retired[MAX_RETIRED_TEXTURES];
++    u32 n_retired;
++} ld_frame_ctx;
++static ld_frame_ctx g_fctx[LD_FRAME_CTX];
++static u32 g_fctx_cur;
++static int g_ld_pipeline;                        /* 1 once context 1 exists */
++
++static void ld_fctx_save(u32 i)
++{
++    ld_frame_ctx* c = &g_fctx[i];
++    c->alloc = g.alloc;
++    c->upload = g.upload; c->upload_mapped = g.upload_mapped;
++    c->vb = g.vb; c->vb_mapped = g.vb_mapped;
++    c->ib = g.ib; c->ib_mapped = g.ib_mapped;
++    c->cb = g.cb; c->cb_mapped = g.cb_mapped;
++    c->ps_cb = g.ps_cb; c->ps_cb_mapped = g.ps_cb_mapped;
++    c->srv_heap = g.srv_heap; c->smp_heap = g.smp_heap;
++}
++static void ld_fctx_load(u32 i)
++{
++    const ld_frame_ctx* c = &g_fctx[i];
++    g.alloc = c->alloc;
++    g.upload = c->upload; g.upload_mapped = c->upload_mapped;
++    g.vb = c->vb; g.vb_mapped = c->vb_mapped;
++    g.ib = c->ib; g.ib_mapped = c->ib_mapped;
++    g.cb = c->cb; g.cb_mapped = c->cb_mapped;
++    g.ps_cb = c->ps_cb; g.ps_cb_mapped = c->ps_cb_mapped;
++    g.srv_heap = c->srv_heap; g.smp_heap = c->smp_heap;
++}
++
+ #define LD_VERTEX_HOIST_FETCH       (1u << 0)
+ #define LD_VERTEX_MASK_SIGNATURE    (1u << 1)
+ #define LD_VERTEX_COMPACT_PAYLOAD   (1u << 2)
+@@ -1777,6 +1830,53 @@
+         g.ready = 0;
+         return;
+     }
++    if (reason == LD_FLUSH_PRESENT && g_ld_pipeline) {
++        /* Pipelined present (see ld_frame_ctx): this frame's retired
++         * resources stay alive until its fence passes; switch to the other
++         * context and wait only for that context's last frame. */
++        ld_frame_ctx* done = &g_fctx[g_fctx_cur];
++        done->fence = v;
++        memcpy(done->retired + done->n_retired, g.retired_textures,
++               (size_t)g.n_retired_textures * sizeof(g.retired_textures[0]));
++        done->n_retired += g.n_retired_textures;
++        g.n_retired_textures = 0;
++        g_fctx_cur = (g_fctx_cur + 1) % LD_FRAME_CTX;
++        ld_frame_ctx* next = &g_fctx[g_fctx_cur];
++        if (g.fence->lpVtbl->GetCompletedValue(g.fence) < next->fence) {
++            const HRESULT event_hr = g.fence->lpVtbl->SetEventOnCompletion(
++                g.fence, next->fence, g.fence_event);
++            if (FAILED(event_hr)) {
++                fprintf(stderr, "[d3d-fail] fence SetEventOnCompletion "
++                        "hr=0x%08lX frame=%u\n", (unsigned long)event_hr, g_ld_frames);
++                ld_dump_dred("SetEventOnCompletion", event_hr);
++                g.ready = 0;
++                return;
++            }
++            const LONGLONG fw0 = ld_slow_qpc();
++            WaitForSingleObject(g.fence_event, INFINITE);
++            static LARGE_INTEGER pwf; if (!pwf.QuadPart) QueryPerformanceFrequency(&pwf);
++            g_ld_fence_wait_us += (unsigned long long)((ld_slow_qpc() - fw0) * 1000000 / pwf.QuadPart);
++            g_ld_fence_waits++;
++        }
++        ld_drain_info_queue("flush");
++        for (u32 i = 0; i < next->n_retired; i++)
++            next->retired[i]->lpVtbl->Release(next->retired[i]);
++        next->n_retired = 0;
++        ld_fctx_load(g_fctx_cur);
++        g.alloc->lpVtbl->Reset(g.alloc);
++        g.list->lpVtbl->Reset(g.list, g.alloc, NULL);
++        /* New context: every ring cursor (and the sampler-table memo, which
++         * indexes the old context's heap) starts over. */
++        g.upload_used = 0;
++        g.vb_used = 0; g.ib_used = 0; g.cb_used = 0; g.ps_cb_used = 0;
++        g.srv_ring_used = 0; g.smp_ring_used = 0;
++#if defined(YZ_PERF_PROFILE)
++        const u64 present_ticks = (u64)(ld_profile_qpc() - flush_begin);
++        g_ld_profile.total.flush_qpc += present_ticks;
++        g_ld_profile.total.flush_reason_qpc[reason] += present_ticks;
++#endif
++        return;
++    }
+     if (g.fence->lpVtbl->GetCompletedValue(g.fence) < v) {
+ #if defined(YZ_PERF_PROFILE)
+         const LONGLONG wait_begin = ld_profile_qpc();
+@@ -1812,6 +1912,13 @@
+     for (u32 i = 0; i < g.n_retired_textures; i++)
+         g.retired_textures[i]->lpVtbl->Release(g.retired_textures[i]);
+     g.n_retired_textures = 0;
++    /* The wait above covered every earlier submit too, so the pipelined
++     * contexts' held resources are free as well. */
++    for (u32 k = 0; g_ld_pipeline && k < LD_FRAME_CTX; k++) {
++        for (u32 i = 0; i < g_fctx[k].n_retired; i++)
++            g_fctx[k].retired[i]->lpVtbl->Release(g_fctx[k].retired[i]);
++        g_fctx[k].n_retired = 0;
++    }
+     g.alloc->lpVtbl->Reset(g.alloc);
+     g.list->lpVtbl->Reset(g.list, g.alloc, NULL);
+     g.upload_used = 0;
+@@ -2181,6 +2288,100 @@
+     return hash;
+ }
+ 
++/* ---------------------------------------------------------------------------
++ * Texture write watch (LD_TEX_WRITE_WATCH, default on when the host reserved
++ * guest memory with MEM_WRITE_WATCH -- main.cpp alloc_guest_vm).
++ *
++ * A cached texture used to be re-hashed on its first bind every frame: every
++ * byte of every bound texture, ~13% of the frame-clock thread in a match. The
++ * OS keeps a written bit per page (the CPU's dirty bit). At the same moment
++ * the hash ran -- the texture's first bind in a frame -- GetWriteWatch(RESET)
++ * over the texture's pages harvests and clears those bits into a per-page
++ * generation table; the texture is re-hashed only when one of its pages was
++ * written since its last hash. Same decision point as before, so a texture
++ * rewritten between frames is still caught on the bind that uses it.
++ *
++ * Safety net: each texture is still fully hashed every 128 frames (~2 s),
++ * staggered by slot; a change that the write watch missed is refreshed and
++ * logged as [ww-miss]. [ww] prints checks/skips every 5 s.
++ * -----------------------------------------------------------------------*/
++extern u8* vm_base;
++#define LD_WW_PAGES   ((u32)(0x100010000ull >> 12))   /* main.cpp VM_SIZE in 4 KB pages */
++#define LD_WW_CHUNK   16384u                           /* pages per GetWriteWatch call */
++static int  g_ww_state = -1;          /* -1 unprobed, 0 off, 1 on */
++static u32* g_ww_page_gen;            /* per page: generation of its last harvested write */
++static u32  g_ww_gen = 1;             /* bumped by each harvest that found written pages */
++static unsigned long long g_ww_checks, g_ww_skips, g_ww_misses, g_ww_fails;
++
++static int ld_ww_enabled(void)
++{
++    if (g_ww_state >= 0) return g_ww_state;
++    g_ww_state = 0;
++    const char* e = getenv("LD_TEX_WRITE_WATCH");
++    if ((e && *e == '0') || !vm_base) {
++        fprintf(stderr, "[ww] texture write watch: off (%s)\n", vm_base ? "LD_TEX_WRITE_WATCH=0" : "no vm_base");
++        return 0;
++    }
++    /* Probe: GetWriteWatch fails on memory not reserved with MEM_WRITE_WATCH. */
++    static PVOID probe[16]; ULONG_PTR n = 16; DWORD gran = 0;
++    const int ok = GetWriteWatch(0, vm_base + 0x10000u, 16u * 4096u, probe, &n, &gran) == 0;
++    if (ok) g_ww_page_gen = (u32*)calloc(LD_WW_PAGES, sizeof(u32));
++    g_ww_state = ok && g_ww_page_gen ? 1 : 0;
++    fprintf(stderr, "[ww] texture write watch: %s\n",
++            g_ww_state ? "on (re-hash only written textures; LD_TEX_WRITE_WATCH=0 = hash every frame)"
++                       : "off (guest memory not reserved with MEM_WRITE_WATCH)");
++    return g_ww_state;
++}
++
++/* Harvest and reset the written bits of [p, p+n) into g_ww_page_gen. Returns
++ * the generation the harvest left (writes after it show up in a later one),
++ * or 0 when GetWriteWatch failed (the caller then hashes). */
++static u32 ld_ww_harvest(const u8* p, u32 n)
++{
++    static PVOID addrs[LD_WW_CHUNK];
++    if (!n || p < vm_base) return 0;
++    uintptr_t a = (uintptr_t)p & ~(uintptr_t)4095u;
++    const uintptr_t end = ((uintptr_t)p + n + 4095u) & ~(uintptr_t)4095u;
++    if (((end - (uintptr_t)vm_base) >> 12) > LD_WW_PAGES) return 0;
++    int found = 0;
++    while (a < end) {
++        uintptr_t len = end - a;
++        if (len > (uintptr_t)LD_WW_CHUNK * 4096u) len = (uintptr_t)LD_WW_CHUNK * 4096u;
++        ULONG_PTR count = LD_WW_CHUNK; DWORD gran = 0;
++        if (GetWriteWatch(WRITE_WATCH_FLAG_RESET, (PVOID)a, (SIZE_T)len, addrs, &count, &gran) != 0) {
++            g_ww_fails++;
++            return 0;
++        }
++        if (count && !found) { g_ww_gen++; found = 1; }
++        for (ULONG_PTR i = 0; i < count; i++)
++            g_ww_page_gen[((uintptr_t)addrs[i] - (uintptr_t)vm_base) >> 12] = g_ww_gen;
++        a += len;
++    }
++    return g_ww_gen;
++}
++
++/* 1 when no page of [p, p+n) was written since generation `since`. */
++static int ld_ww_clean_since(const u8* p, u32 n, u32 since)
++{
++    const u32 p0 = (u32)(((uintptr_t)p - (uintptr_t)vm_base) >> 12);
++    const u32 p1 = (u32)(((uintptr_t)p + n - 1u - (uintptr_t)vm_base) >> 12);
++    for (u32 i = p0; i <= p1; i++)
++        if (g_ww_page_gen[i] > since) return 0;
++    return 1;
++}
++
++static void ld_ww_stats(void)
++{
++    static LONGLONG t0, f;
++    LARGE_INTEGER now; QueryPerformanceCounter(&now);
++    if (!f) { LARGE_INTEGER q; QueryPerformanceFrequency(&q); f = q.QuadPart; t0 = now.QuadPart; }
++    if (now.QuadPart - t0 < 5 * f) return;
++    t0 = now.QuadPart;
++    fprintf(stderr, "[ww] last 5 s: texture checks=%llu skipped-hash=%llu misses=%llu fails=%llu\n",
++            g_ww_checks, g_ww_skips, g_ww_misses, g_ww_fails);
++    g_ww_checks = g_ww_skips = 0;
++}
++
+ static ID3D12Resource* decode_guest_texture(const rsx_dsp_texture* t, u32 remap)
+ {
+     const u32 base_fmt = t->format & TEX_FMT_BASE_MASK & ~(u32)TEX_FMT_UNNORM;
+@@ -2541,6 +2742,26 @@
+             continue;
+         if (refresh_enabled && entry->tex &&
+             entry->last_hash_frame != g_ld_frames) {
++            /* Write watch (ld_ww_*): skip the hash when none of the
++             * texture's pages were written since its last hash. */
++            u32 ww_now = 0;
++            int ww_clean = 0;
++            if (ld_ww_enabled()) {
++                const u32 span = texture_source_span(t);
++                const u8* src = span ? guest_ptr(t->location, t->offset, span) : NULL;
++                if (src && (ww_now = ld_ww_harvest(src, span)) != 0)
++                    ww_clean = entry->ww_gen && ld_ww_clean_since(src, span, entry->ww_gen);
++                g_ww_checks++;
++                ld_ww_stats();
++            }
++            if (ww_clean && entry->ww_skips < 128u) {
++                entry->ww_skips++;
++                g_ww_skips++;
++                entry->last_hash_frame = g_ld_frames;
++                entry->last_use_serial = ++g_ld_texture_use_serial;
++                return SRV_TEXTURE_BASE + i;
++            }
++            entry->ww_skips = 0;
+             int readable = 0;
+             const u64 hash = texture_content_hash(t, &readable);
+             /* LD_TEX_RACE=1: hash the SAME source twice, back to back. The two
+@@ -2588,6 +2809,16 @@
+                               t->pitch);
+               } }
+             entry->last_hash_frame = g_ld_frames;
++            if (ww_now) entry->ww_gen = ww_now;
++            if (readable && hash != entry->content_hash && ww_clean) {
++                /* The 128-frame safety net found a change the write watch
++                 * did not report. Refreshed below like any other change. */
++                g_ww_misses++;
++                if (g_ww_misses <= 32)
++                    fprintf(stderr, "[ww-miss] n=%llu frame=%u src=%u:0x%08X fmt=0x%02X %ux%u\n",
++                            g_ww_misses, g_ld_frames, t->location, t->offset,
++                            t->format, t->width, t->height);
++            }
+             if (readable && hash != entry->content_hash) {
+                 ID3D12Resource* replacement =
+                     decode_guest_texture_profiled(t, remap);
+@@ -2656,6 +2887,13 @@
+     replacement.last_hash_frame = g_ld_frames;
+     replacement.last_use_serial = ++g_ld_texture_use_serial;
+     {
++        /* Harvest the written bits first: a write after this point shows
++         * up at the next check and re-hashes (ld_ww_*). */
++        if (ld_ww_enabled()) {
++            const u32 span = texture_source_span(t);
++            const u8* src = span ? guest_ptr(t->location, t->offset, span) : NULL;
++            if (src) replacement.ww_gen = ld_ww_harvest(src, span);
++        }
+         int readable = 0;
+         replacement.content_hash = texture_content_hash(t, &readable);
+     }
+@@ -3805,6 +4043,7 @@
+         if (z->location == location && z->offset == offset) {
+             if (z->w >= want_w && z->h >= want_h) {
+                 zdepth_grow_snapshot(i, rt_w, rt_h);
++                z->last_bind_frame = g_ld_frames;
+                 return 1 + i;
+             }
+             slot = i;
+@@ -3923,9 +4162,31 @@
+             slot, location, offset, want_w, want_h,
+             rt_w, rt_h, g.width, g.height);
+     if (slot == g.n_zdepths) g.n_zdepths++;
++    z->last_bind_frame = g_ld_frames;
+     return 1 + slot;
+ }
+ 
++/* 1 when loc:abs lies inside a depth buffer the live renderer keeps on the
++ * GPU and a pass bound in the last two frames. The draws never write its
++ * guest memory, so a CPU copy out of it (Sakatsuku's match resolves its
++ * 2560x1440 depth 0x012C0000 into 0x00B40000 with scaled NV3089 blits, about
++ * 7% of the frame-clock thread) moves only stale bytes. */
++int rsx_live_draw_is_gpu_depth(u32 loc, u32 abs)
++{
++    if (!g.ready) return 0;
++    for (u32 i = 0; i < g.n_zdepths; i++) {
++        const zdepth_t* z = &g.zdepths[i];
++        if (!z->tex || z->location != loc || abs < z->offset ||
++            g_ld_frames - z->last_bind_frame > 2u)
++            continue;
++        const u32 w = z->snapshot_w ? z->snapshot_w : z->w;
++        const u32 h = z->snapshot_h ? z->snapshot_h : z->h;
++        if ((u64)abs < (u64)z->offset + (u64)w * 4u * h)
++            return 1;
++    }
++    return 0;
++}
++
+ /* Preserve the last completed depth-writing pass before the guest clears or
+  * reuses its live zeta.  The replay renderer gets these bytes from its
+  * captured cross-frame memory image; live rendering must explicitly retain
+@@ -4816,9 +5077,39 @@
+  * and every result equals a fresh computation. LD_NO_PROGRAM_MEMO=1 disables. */
+ typedef struct {
+     u32 start, instrs, input_mask, txl_mask;
++    u32 const_lo, const_hi;   /* constant range the program reads (lo > hi: none) */
++    int const_rel;            /* 1 = indexes constants by an address register: any */
+     u64 hash;
+     u8  bytes[RSX_DSP_VP_INSTR * 16];
+ } ld_vp_memo;
++
++/* The vertex constants a program can read, from the instruction fields the
++ * decompiler uses (rsx_vp_decompiler.c: D1.const_src [12:21], D3.index_const
++ * [1], source reg_type [0:1] == 3). A superset: an instruction's const_src
++ * counts when any of its three source fields names the constant file, used by
++ * its opcode or not. Relative addressing can reach any of the 512. */
++static void ld_vp_const_range(const u8* uc, u32 instrs, u32* lo, u32* hi, int* rel)
++{
++    u32 l = 512u, h = 0u; int r = 0;
++    for (u32 i = 0; i < instrs; i++) {
++        const u8* p = uc + (size_t)i * 16u;
++        u32 d[4];
++        memcpy(d, p, 16);   /* little-endian words, as the decompiler's rd_le */
++        const u32 src0 = ((d[2] >> 23) & 0x1FFu) | ((d[1] & 0xFFu) << 9);
++        const u32 src1 = (d[2] >> 6) & 0x1FFFFu;
++        const u32 src2 = ((d[3] >> 21) & 0x7FFu) | ((d[2] & 0x3Fu) << 11);
++        if ((src0 & 3u) != 3u && (src1 & 3u) != 3u && (src2 & 3u) != 3u) continue;
++        if ((d[3] >> 1) & 1u) { r = 1; continue; }
++        const u32 c = ((d[1] >> 12) & 0x3FFu) & 511u;
++        if (c < l) l = c;
++        if (c > h) h = c;
++    }
++    *lo = l; *hi = h; *rel = r;
++}
++/* Set by get_pso for the draw being built: the constant range its vertex
++ * program reads, so the draw uploads only that (see the b0 write). */
++static u32 g_ld_draw_const_lo = 0, g_ld_draw_const_hi = 511;
++static int g_ld_draw_const_rel = 1;
+ typedef struct {
+     u32 loc, off, size;
+     int buffered;
+@@ -4862,6 +5153,7 @@
+     m->start = start;
+     m->input_mask = analysis.input_mask;
+     m->txl_mask = vp_txl_unit_mask(vp_uc, instrs);
++    ld_vp_const_range(vp_uc, instrs, &m->const_lo, &m->const_hi, &m->const_rel);
+     m->hash = fnv1a(vp_uc, instrs * 16, 1469598103934665603ull);
+     memcpy(m->bytes, vp_uc, instrs * 16u);
+     m->instrs = instrs;
+@@ -4938,6 +5230,9 @@
+     const ld_vp_memo* vm = ld_vp_facts(start);
+     if (!vm) { LD_PSO_BAIL("vertex program has zero instructions"); return NULL; }
+     const u32 vp_instrs = vm->instrs;
++    g_ld_draw_const_lo = vm->const_lo;
++    g_ld_draw_const_hi = vm->const_hi;
++    g_ld_draw_const_rel = vm->const_rel;
+ 
+     u32 fp_loc = 0;
+     const u32 fp_off = rsx_dsp_fragment_program(&g.rsx, &fp_loc);
+@@ -8093,7 +8388,18 @@
+         xf[6] = vp.translate[2];
+     }
+     u8* cbdst = g.cb_mapped + g.cb_used;
+-    memcpy(cbdst, g.rsx.constants, RSX_DSP_NUM_CONSTANTS * 16);
++    /* Upload only the constants this draw's vertex program can read (its
++     * range from get_pso; all 512 when it indexes them by address register).
++     * The whole 8 KB per draw was 24-40 MB of upload-heap writes a frame at
++     * 3,000-5,000 draws; the shader never reads the rest of the block.
++     * LD_CB_FULL=1 always copies all 512. */
++    { static int cb_full = -1;
++      if (cb_full < 0) { const char* e = getenv("LD_CB_FULL"); cb_full = (e && *e == '1') ? 1 : 0; }
++      if (cb_full || g_ld_draw_const_rel)
++          memcpy(cbdst, g.rsx.constants, RSX_DSP_NUM_CONSTANTS * 16);
++      else if (g_ld_draw_const_lo <= g_ld_draw_const_hi)
++          memcpy(cbdst + (size_t)g_ld_draw_const_lo * 16u, g.rsx.constants[g_ld_draw_const_lo],
++                 (size_t)(g_ld_draw_const_hi - g_ld_draw_const_lo + 1u) * 16u); }
+     memcpy(cbdst + 512 * 16, xf, sizeof(xf));
+ 
+     g.list->lpVtbl->SetPipelineState(g.list, pso);
+@@ -8788,6 +9094,52 @@
+                 (void*)g.smp_cpu_heap, (void*)g.smp_heap);
+         return -1;
+     }
++    /* LD_PIPELINE (default on): a second frame context, see ld_frame_ctx.
++     * Same ring sizes as context 0, so per-frame overflow behaviour is the
++     * same as before. Any allocation failure keeps the synchronous present. */
++    ld_fctx_save(0);
++    g_fctx_cur = 0;
++    { const char* e = getenv("LD_PIPELINE");
++      if (!(e && *e == '0')) {
++          ld_frame_ctx* c = &g_fctx[1];
++          int ok = g.ps_cb_mapped != NULL &&
++              SUCCEEDED(g.dev->lpVtbl->CreateCommandAllocator(
++                  g.dev, D3D12_COMMAND_LIST_TYPE_DIRECT,
++                  &IID_ID3D12CommandAllocator, (void**)&c->alloc));
++          struct { ID3D12Resource** res; void** map; UINT64 size; } rings[5] = {
++              { &c->upload, (void**)&c->upload_mapped, UPLOAD_SIZE },
++              { &c->vb,     (void**)&c->vb_mapped,     VERT_BUFFER_SIZE },
++              { &c->ib,     (void**)&c->ib_mapped,     INDEX_BUFFER_SIZE },
++              { &c->cb,     (void**)&c->cb_mapped,     CB_RING_BYTES },
++              { &c->ps_cb,  (void**)&c->ps_cb_mapped,  PS_CB_RING_BYTES } };
++          for (u32 i = 0; ok && i < 5; i++) {
++              bd.Width = rings[i].size;
++              ok = SUCCEEDED(g.dev->lpVtbl->CreateCommittedResource(
++                       g.dev, &hp, D3D12_HEAP_FLAG_NONE, &bd,
++                       D3D12_RESOURCE_STATE_GENERIC_READ, NULL,
++                       &IID_ID3D12Resource, (void**)rings[i].res)) &&
++                   SUCCEEDED((*rings[i].res)->lpVtbl->Map(*rings[i].res, 0, &rr, rings[i].map));
++          }
++          if (ok) {
++              D3D12_DESCRIPTOR_HEAP_DESC chd = {0};
++              chd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
++              chd.NumDescriptors = SRV_RING_TABLES * SRV_TABLE_SIZE;
++              chd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
++              ok = SUCCEEDED(g.dev->lpVtbl->CreateDescriptorHeap(
++                  g.dev, &chd, &IID_ID3D12DescriptorHeap, (void**)&c->srv_heap));
++              chd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER;
++              chd.NumDescriptors = SMP_RING_TABLES * SMP_TABLE_SIZE;
++              if (ok)
++                  ok = SUCCEEDED(g.dev->lpVtbl->CreateDescriptorHeap(
++                      g.dev, &chd, &IID_ID3D12DescriptorHeap, (void**)&c->smp_heap));
++          }
++          g_ld_pipeline = ok;
++          fprintf(stderr, "[live-draw] frame pipelining: %s\n",
++                  ok ? "on (2 frame contexts; LD_PIPELINE=0 = synchronous present)"
++                     : "off (context 1 allocation failed)");
++      } else
++          fprintf(stderr, "[live-draw] frame pipelining: off (LD_PIPELINE=0)\n");
++    }
+     {
+         D3D12_SAMPLER_DESC def = {0};
+         def.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -612,7 +612,15 @@
+     u32 cdata  = galloc ? galloc(16, 16) : 0;
+     if (cdata && gwrite32) {
+         gwrite32(cdata + 0x0, cmdbuf);              /* begin   */
+-        gwrite32(cdata + 0x4, cmdbuf + cmdSize);    /* end     */
++        /* end: the last word of the buffer stays free for the wrap JUMP the
++         * buffer-full callback writes at `current` (libgcm/RPCS3 keep the same
++         * 4 bytes). With end = cmdbuf + cmdSize a title that fills the ring to
++         * the brim had the JUMP written one word PAST it -- in Sakatsuku onto
++         * the fragment programs stored right after its 7 MB ring -- and when
++         * that word was rewritten the walker ran into shader code and the
++         * callback waited out its 2 s stall. GCM_CTX_END_FULL=1 = old end. */
++        { const char* e = getenv("GCM_CTX_END_FULL");
++          gwrite32(cdata + 0x4, cmdbuf + cmdSize - ((e && *e == '1') ? 0u : 4u)); }   /* end */
+         gwrite32(cdata + 0x8, cmdbuf);              /* current */
+         /* Command-buffer-full callback: a guest OPD {func, toc} routed to
+          * hle_gcm_callback -> cellGcm_fifo_recycle. Without a real callback the
+@@ -2299,6 +2307,30 @@
+         s_tr_off[s_tr_i % GCM_TRACE_N] = s_fifo_getoff;
+         s_tr_w[s_tr_i % GCM_TRACE_N] = w;
+         s_tr_i++;
++        /* GCM_RING_DBG=1: the walker stepping past the end of the title's
++         * command ring has missed the wrap JUMP the buffer-full callback wrote
++         * (Sakatsuku: ring IO 0..0x700000, a 2 s freeze when it happens).
++         * Dump the decode run-up once per crossing. */
++        { static int rd = -1; static u32 prev_off = 0;
++          if (rd < 0) rd = getenv("GCM_RING_DBG") ? 1 : 0;
++          if (rd) {
++              u32 ctx = s_gcm_ctx_out_ea ? vm_read32(s_gcm_ctx_out_ea) : 0;
++              if (!ctx) ctx = s_gcm_context_ea;
++              const u32 end_ea = ctx ? vm_read32(ctx + 4) : 0;
++              const u32 end_io = end_ea ? gcm_ea2io(end_ea) : 0xFFFFFFFFu;
++              if (end_io != 0xFFFFFFFFu && s_fifo_getoff > end_io && prev_off <= end_io &&
++                  s_fifo_getoff - prev_off < 0x10000u) {   /* a step, not a JUMP/CALL elsewhere */
++                  fprintf(stderr, "[RING] walker passed ring end io=%08X: get=%08X prev=%08X put=%08X "
++                          "ctx=%08X begin=%08X end=%08X current=%08X back_jumps=%u\n",
++                          end_io, s_fifo_getoff, prev_off, put, ctx, vm_read32(ctx), end_ea,
++                          vm_read32(ctx + 8), s_fifo_back_jumps);
++                  for (u32 k = GCM_TRACE_N; k >= 1; k--) {
++                      const u32 q = (s_tr_i - k) % GCM_TRACE_N;
++                      fprintf(stderr, "[RING]   io=%08X w=%08X\n", s_tr_off[q], s_tr_w[q]);
++                  }
++              }
++              prev_off = s_fifo_getoff;
++          } }
+         if (w && ((w & 0xE0000003u) == 0x20000000u || (w & 3u) == 1u || (w & 3u) == 2u)) {
+             s_cf_off[s_cf_i % 8] = s_fifo_getoff; s_cf_w[s_cf_i % 8] = w; s_cf_i++; }
+         /* GCM_WORD_STATS=<secs>: NOP words vs headers vs jumps/calls/returns
+--- a/main.cpp
++++ b/main.cpp
+@@ -1210,7 +1210,16 @@
+ {
+ #ifdef _WIN32
+     AddVectoredExceptionHandler(1, vm_commit_veh);
+-    vm_base = (uint8_t*)VirtualAlloc(NULL, VM_SIZE, MEM_RESERVE, PAGE_READWRITE);
++    /* MEM_WRITE_WATCH: the OS keeps a per-page written bit (the CPU's own
++     * dirty bit, no faults), so the live renderer re-hashes a cached texture
++     * only when its pages were written (rsx_live_draw.c ld_ww_*). Hashing every
++     * bound texture each frame was ~13% of the frame-clock thread in a match.
++     * PS3_VM_WRITE_WATCH=0 reserves without it (the renderer then hashes). */
++    { const char* e = getenv("PS3_VM_WRITE_WATCH");
++      if (!(e && *e == '0'))
++          vm_base = (uint8_t*)VirtualAlloc(NULL, VM_SIZE, MEM_RESERVE | MEM_WRITE_WATCH, PAGE_READWRITE); }
++    if (!vm_base)
++        vm_base = (uint8_t*)VirtualAlloc(NULL, VM_SIZE, MEM_RESERVE, PAGE_READWRITE);
+     ppu_vm_size = 0;              /* the whole space is backed; no OOB guard needed */
+ #else
+     /* No vectored exception handlers off Windows, so the arena is mapped up
+--- a/libs/video/rsx_live_draw.h
++++ b/libs/video/rsx_live_draw.h
+@@ -92,6 +92,9 @@
+ int rsx_live_draw_resolve_blit(u32 src_loc, u32 src_abs, u32 src_pitch, u32 ds, u32 dt,
+                                u32 dst_loc, u32 dst_abs, u32 dst_pitch,
+                                u32 out_x, u32 out_y, u32 out_w, u32 out_h);
++/* 1 when loc:abs lies in a depth buffer the live renderer keeps only on the GPU
++ * (bound in the last two frames): a guest-memory copy out of it is stale. */
++int rsx_live_draw_is_gpu_depth(u32 loc, u32 abs);
+ 
+ /* Block until the GPU finishes all queued draws (RSX SET_REFERENCE / sync
+  * fence). Mirrors RPCS3 nv406e::set_reference's sync() so REF advances only

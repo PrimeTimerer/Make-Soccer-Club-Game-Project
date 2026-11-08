@@ -1,0 +1,54 @@
+--- a/recompiled/ppu_recomp_018.cpp
++++ b/recompiled/ppu_recomp_018.cpp
+@@ -22833,6 +22833,7 @@
+         return; /* b -> non-code 0x01D770EC */
+ }
+ 
++extern "C" int saka_logic60(void);
+ void func_00634CF0(ppu_context* ctx) {
+     PPU_MM_SNAP
+         uint64_t _cs_24 = ctx->gpr[24];
+@@ -22865,6 +22866,7 @@
+         vm_write64(ctx->gpr[1] + 0x90, ctx->gpr[26]);
+         vm_write64(ctx->gpr[1] + 0x88, ctx->gpr[25]);
+         vm_write64(ctx->gpr[1] + 0x80, ctx->gpr[24]);
++        if (saka_logic60()) ctx->gpr[3] = 1;   /* Sakatsuku SAKA_LOGIC60: one vblank per tick (dt 1/60, factor 0.5) */
+         vm_write32(ctx->gpr[28] + 0xC0, ctx->gpr[3]);
+         ctx->lr = 0x00634D50; func_001946B0(ctx); DRAIN_TRAMPOLINE(ctx);
+         ctx->gpr[4] = vm_read64(ctx->gpr[28] + 0x158);
+@@ -22874,7 +22876,7 @@
+         ctx->gpr[4] = (int64_t)(int32_t)((uint32_t)0x0 << 16);
+         vm_write64(ctx->gpr[28] + 0x158, ctx->gpr[31]);
+         ctx->gpr[6] = (int64_t)(int32_t)((uint32_t)0x1 << 16);
+-        ctx->gpr[4] = ctx->gpr[4] | 0x8235;
++        ctx->gpr[4] = ctx->gpr[4] | (saka_logic60() ? 0x411B : 0x8235);   /* SAKA_LOGIC60: min elapsed 16667 us, not 33333 */
+         ctx->gpr[6] = ctx->gpr[6] | 0x86A0;
+         { uint64_t result = ~ctx->gpr[4] + ctx->gpr[3] + 1; ctx->xer = (ctx->xer & ~(1u << 29)) | ((ctx->gpr[3] >= ctx->gpr[4]) ? (1u << 29) : 0); ctx->gpr[5] = result; }
+         ctx->gpr[5] = (int64_t)(int32_t)ctx->gpr[5];
+--- a/recompiled/ppu_recomp_029.cpp
++++ b/recompiled/ppu_recomp_029.cpp
+@@ -73919,6 +73919,7 @@
+         return; /* b -> non-code 0x01D770EC */
+ }
+ 
++extern "C" int saka_logic60(void);
+ void func_00634CF8(ppu_context* ctx) {
+     PPU_MM_SNAP
+         uint64_t _cs_24 = ctx->gpr[24];
+@@ -73949,6 +73950,7 @@
+         vm_write64(ctx->gpr[1] + 0x90, ctx->gpr[26]);
+         vm_write64(ctx->gpr[1] + 0x88, ctx->gpr[25]);
+         vm_write64(ctx->gpr[1] + 0x80, ctx->gpr[24]);
++        if (saka_logic60()) ctx->gpr[3] = 1;   /* Sakatsuku SAKA_LOGIC60: one vblank per tick (dt 1/60, factor 0.5) */
+         vm_write32(ctx->gpr[28] + 0xC0, ctx->gpr[3]);
+         ctx->lr = 0x00634D50; func_001946B0(ctx); DRAIN_TRAMPOLINE(ctx);
+         ctx->gpr[4] = vm_read64(ctx->gpr[28] + 0x158);
+@@ -73958,7 +73960,7 @@
+         ctx->gpr[4] = (int64_t)(int32_t)((uint32_t)0x0 << 16);
+         vm_write64(ctx->gpr[28] + 0x158, ctx->gpr[31]);
+         ctx->gpr[6] = (int64_t)(int32_t)((uint32_t)0x1 << 16);
+-        ctx->gpr[4] = ctx->gpr[4] | 0x8235;
++        ctx->gpr[4] = ctx->gpr[4] | (saka_logic60() ? 0x411B : 0x8235);   /* SAKA_LOGIC60: min elapsed 16667 us, not 33333 */
+         ctx->gpr[6] = ctx->gpr[6] | 0x86A0;
+         { uint64_t result = ~ctx->gpr[4] + ctx->gpr[3] + 1; ctx->xer = (ctx->xer & ~(1u << 29)) | ((ctx->gpr[3] >= ctx->gpr[4]) ? (1u << 29) : 0); ctx->gpr[5] = result; }
+         ctx->gpr[5] = (int64_t)(int32_t)ctx->gpr[5];

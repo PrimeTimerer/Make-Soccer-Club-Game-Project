@@ -1,0 +1,218 @@
+diff --git a/libs/video/rsx_dispatch.c b/libs/video/rsx_dispatch.c
+index eca370f..c7f3a40 100644
+--- a/libs/video/rsx_dispatch.c
++++ b/libs/video/rsx_dispatch.c
+@@ -596,6 +596,14 @@ void rsx_dsp_get_vertex_texture(const rsx_dispatch* rsx, u32 unit,
+     out->width     = rect >> 16;
+     out->height    = rect & 0xFFFF;
+     out->border_color = rsx_dsp_reg(rsx, base + 0x1C);
++    /* A 1D vertex texture (dimension 1: a skinning palette, one row of
++     * matrices) is a 2D texture one texel high; its height field carries no
++     * row count. Engines that take 2D only would otherwise drop it and skin
++     * nothing (Sakatsuku's match players stood in their bind pose). */
++    if (out->dimension == 1 && !out->cubemap) {
++        out->dimension = 2;
++        out->height = 1;
++    }
+ }
+ 
+ u32 rsx_dsp_vertex_data_base_offset(const rsx_dispatch* rsx)
+diff --git a/libs/video/rsx_live_draw.c b/libs/video/rsx_live_draw.c
+index 2579117..2e4ba57 100644
+--- a/libs/video/rsx_live_draw.c
++++ b/libs/video/rsx_live_draw.c
+@@ -22,7 +22,7 @@
+ #include "rsx_live_draw.h"
+ #include "ps3emu/yz_runtime_config.h"
+ #include "ps3emu/yz_frontier_trace.h"
+-#include "ps3emu/log_first.h"
++#include "ps3emu/log_first.h"
+ 
+ #if !defined(_WIN32)
+ 
+@@ -88,9 +88,9 @@ static volatile long g_ld_ps1_vram_ready = 0;
+ #if defined(YZ_PERF_CLEAN) || defined(_MSC_VER)
+ #define LD_DIAG_ENABLED(name) 0
+ #else
+-/* Cached per call site: several of these sit on per-draw paths. */
+-#define LD_DIAG_ENABLED(name) ({ static int _ld_diag = -1; \
+-    if (_ld_diag < 0) _ld_diag = getenv(name) != NULL; _ld_diag; })
++/* Cached per call site: several of these sit on per-draw paths. */
++#define LD_DIAG_ENABLED(name) ({ static int _ld_diag = -1; \
++    if (_ld_diag < 0) _ld_diag = getenv(name) != NULL; _ld_diag; })
+ #endif
+ #include <string.h>
+ 
+@@ -1022,6 +1022,7 @@ static u64 g_ld_vtex_refreshes = 0;
+ static u64 g_ld_vtex_unsupported = 0;
+ static u64 g_ld_vtex_enabled = 0;
+ static u64 g_ld_vtex_missing_for_txl = 0;
++static u64 g_ld_vtex_surface_binds = 0;   /* vertex textures bound to a render surface */
+ static u64 g_ld_divider_fetches = 0;
+ static char g_ld_shader_disk_dir[MAX_PATH];
+ static int g_ld_shader_disk_ready = -1;
+@@ -2682,7 +2683,9 @@ static u32 vertex_texture_mask(void)
+         } else {
+             g_ld_vtex_unsupported++;
+             static u32 warned = 0;
+-            if (PS3_LOG_FIRST(warned, 16) && vertex_texture_trace_enabled())
++            /* The first 8 always (a title's vertex-texture use is otherwise
++             * invisible in a player's log); RSX_VTEX_TRACE=1 for 16. */
++            if ((warned < 8 || vertex_texture_trace_enabled()) && PS3_LOG_FIRST(warned, 16))
+                 fprintf(stderr,
+                         "[vtex] enabled but unsupported unit=%u off=0x%08X "
+                         "fmt=0x%02X dim=%u cube=%u %ux%u pitch=%u ctl=0x%08X\n",
+@@ -3484,19 +3487,41 @@ int rsx_live_draw_resolve_blit(u32 src_loc, u32 src_abs, u32 src_pitch, u32 ds,
+         si = (int)i; gx = (d % src_pitch) / 4u; gy = d / src_pitch;
+     }
+     if (si < 0) return 0;
+-    /* Destination: the display buffer this tile writes into. */
++    /* Destination: the display buffer this tile writes into -- or, when the
++     * title resolves into an off-screen surface of its own, the live surface
++     * there. Sakatsuku draws all its 3D (secretary, heads in the face viewer
++     * and on the player cards, the match) into a 2560x1440 2x2-supersampled
++     * target and resolves it with scaled NV3089 blits into its 1280x720
++     * working surface at 0x00F00000, which is not a display buffer; those
++     * resolves were dropped, so only the 2D layers ever reached the screen. */
+     int bi = -1;
+     for (u32 b = 0; b < 8; b++) {
+         const display_buffer_t* d = &g.display_buffers[b];
+         if (d->valid && d->location == dst_loc && dst_abs >= d->offset &&
+             dst_abs < d->offset + d->pitch * d->height) { bi = (int)b; break; }
+     }
+-    if (bi < 0) return 0;
+-    const display_buffer_t* db = &g.display_buffers[bi];
+-    const u32 dx = (dst_abs - db->offset) % db->pitch / 4u + out_x;
+-    const u32 dy = (dst_abs - db->offset) / db->pitch + out_y;
+-    const u32 slot = surface_get(db->location, db->offset, db->width, db->height, g.surfaces[si].fmt);
+-    if (slot == LD_INVALID_SURFACE || (int)slot == si) return 0;
++    u32 dx, dy, slot;
++    if (bi >= 0) {
++        const display_buffer_t* db = &g.display_buffers[bi];
++        dx = (dst_abs - db->offset) % db->pitch / 4u + out_x;
++        dy = (dst_abs - db->offset) / db->pitch + out_y;
++        slot = surface_get(db->location, db->offset, db->width, db->height, g.surfaces[si].fmt);
++        if (slot == LD_INVALID_SURFACE || (int)slot == si) return 0;
++    } else {
++        u32 ox = 0, oy = 0;
++        const int di = surface_containing(dst_loc, dst_abs, dst_pitch, out_x + out_w, out_y + out_h,
++                                          &ox, &oy);
++        if (di < 0 || di == si) return 0;
++        slot = (u32)di;
++        dx = ox + out_x;
++        dy = oy + out_y;
++        static u32 said = 0;
++        if (PS3_LOG_FIRST(said, 8))
++            fprintf(stderr, "[live-draw] resolve into surface[%u] %u:0x%08X at %u,%u %ux%u "
++                            "from surface[%d] 0x%08X (ds=0x%X dt=0x%X)\n",
++                    slot, dst_loc, g.surfaces[slot].offset, dx, dy, out_w, out_h,
++                    si, g.surfaces[si].offset, ds, dt);
++    }
+     surface_t* dst = &g.surfaces[slot];
+     if (scaled) {
+         /* Source extent in the blit's source units, which match host pixels
+@@ -4456,9 +4481,19 @@ static ID3D12PipelineState* build_pso(
+             g_ld_profile.total.vs_compile_calls++;
+             const LONGLONG compile_begin = ld_profile_qpc();
+ #endif
++            /* Decompiled vertex programs are the expensive compiles (about
++             * 0.5 s each at the default level for Sakatsuku's match shaders,
++             * and a new scene brings dozens, all on the draw path). Skipping
++             * FXC's optimiser halves that; the driver optimises the DXBC
++             * again anyway. RSX_VS_COMPILE_OPT=1 restores the default. */
++            static UINT vs_flags = ~0u;
++            if (vs_flags == ~0u) {
++                const char* e = getenv("RSX_VS_COMPILE_OPT");
++                vs_flags = (e && *e == '1') ? 0u : D3DCOMPILE_SKIP_OPTIMIZATION;
++            }
+             vs_hr = D3DCompile(
+                 vs_hlsl, vs_length, "xvs", NULL, NULL, "main",
+-                "vs_5_0", 0, 0, &vs, &err);
++                "vs_5_0", vs_flags, 0, &vs, &err);
+ #if defined(YZ_PERF_PROFILE)
+             g_ld_profile.total.vs_compile_qpc +=
+                 (u64)(ld_profile_qpc() - compile_begin);
+@@ -7559,7 +7594,7 @@ static void sink_end_impl(void* user, const rsx_dispatch* r)
+                   }
+               }
+           } }
+-        if (sampled < 0 && LD_DIAG_ENABLED("LD_ALIAS_DBG")) {
++        if (sampled < 0 && LD_DIAG_ENABLED("LD_ALIAS_DBG")) {
+             static u32 n_dbg = 0;
+             if (PS3_LOG_FIRST(n_dbg, 24)) {
+                 fprintf(stderr, "[alias-miss] tex %u:0x%08X fmt=0x%02X %ux%u target=%u surf:",
+@@ -7668,6 +7703,36 @@ static void sink_end_impl(void* user, const rsx_dispatch* r)
+         if (!((vtex_mask >> u) & 1u)) continue;
+         rsx_dsp_vertex_texture vt;
+         rsx_dsp_get_vertex_texture(&g.rsx, u, &vt);
++        /* A vertex texture at a live render surface's address is data the GPU
++         * wrote this frame (Sakatsuku's match computes its skinning palettes
++         * into float targets; guest memory never sees them, so the decoded
++         * copy below stayed the first upload -- vtex refresh=0 -- and every
++         * player stood in its bind pose). Bind the surface, as fragment
++         * textures do; the barriers below make it shader-readable. */
++        { int vsurf = -1; u32 best_gen = 0;
++          for (u32 i = 0; i < g.n_surfaces; i++) {
++              const surface_t* s = &g.surfaces[i];
++              if (s->location != vt.location || s->offset != vt.offset || i == target)
++                  continue;
++              if (vsurf < 0 || s->last_draw_generation > best_gen) {
++                  vsurf = (int)i;
++                  best_gen = s->last_draw_generation;
++              }
++          }
++          if (vsurf >= 0) {
++              vtex_slots[u] = SRV_SURFACE_BASE + (u32)vsurf;
++              g_ld_vtex_binds++;
++              g_ld_vtex_surface_binds++;
++              int seen = 0;
++              for (u32 k = 0; k < n_surf_used; k++) if (surf_used[k] == (u32)vsurf) seen = 1;
++              if (!seen && n_surf_used < SRV_TABLE_SIZE) surf_used[n_surf_used++] = (u32)vsurf;
++              static u32 said = 0;
++              if (PS3_LOG_FIRST(said, 8))
++                  fprintf(stderr, "[vtex] unit %u %u:0x%08X fmt=0x%02X %ux%u -> render surface[%d] %ux%u\n",
++                          u, vt.location, vt.offset, vt.format, vt.width, vt.height, vsurf,
++                          g.surfaces[vsurf].w, g.surfaces[vsurf].h);
++              continue;
++          } }
+         vtex_slots[u] = vertex_texture_srv_slot(&vt);
+         if (vtex_slots[u] != SRV_WHITE)
+             g_ld_vtex_binds++;
+@@ -7693,7 +7758,9 @@ static void sink_end_impl(void* user, const rsx_dispatch* r)
+     for (u32 k = 0; k < n_surf_used; k++) {
+         bar.Transition.pResource = g.surfaces[surf_used[k]].tex;
+         bar.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+-        bar.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
++        /* Pixel AND non-pixel: a surface may be bound as a vertex texture. */
++        bar.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
++                                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+         g.list->lpVtbl->ResourceBarrier(g.list, 1, &bar);
+     }
+     D3D12_CPU_DESCRIPTOR_HANDLE rtv = rtv_handle(LD_SWAP_BUFFERS + target);
+@@ -7895,7 +7962,8 @@ static void sink_end_impl(void* user, const rsx_dispatch* r)
+ 
+     for (u32 k = 0; k < n_surf_used; k++) {
+         bar.Transition.pResource = g.surfaces[surf_used[k]].tex;
+-        bar.Transition.StateBefore = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
++        bar.Transition.StateBefore = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
++                                     D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+         bar.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
+         g.list->lpVtbl->ResourceBarrier(g.list, 1, &bar);
+     }
+@@ -9802,7 +9870,7 @@ void rsx_live_draw_present(u32 buffer_id)
+                 "alloc=%llu pso=%llu ring=%llu surface=%llu}] clears[guest=%llu badsurf=%llu implicitZ=%llu] "
+                 "textures[cached=%u/%u full=%llu decodefail=%llu depthSRV=%llu rejectZ=%llu] "
+                 "vtex[cached=%u enabled=%llu binds=%llu uploads=%llu refresh=%llu "
+-                "unsupported=%llu missingTXL=%llu] divider=%llu "
++                "unsupported=%llu missingTXL=%llu surf=%llu] divider=%llu "
+                 "balance[p=%s g=%s] binds[white=%llu real=%llu surf=%llu] (cumulative)\n",
+                 g_ld_frames,
+                 g_ld_stats.packets_seen, g_ld_stats.packets_queued,
+@@ -9826,6 +9894,7 @@ void rsx_live_draw_present(u32 buffer_id)
+                 (unsigned long long)g_ld_vtex_refreshes,
+                 (unsigned long long)g_ld_vtex_unsupported,
+                 (unsigned long long)g_ld_vtex_missing_for_txl,
++                (unsigned long long)g_ld_vtex_surface_binds,
+                 (unsigned long long)g_ld_divider_fetches,
+                 g_ld_stats.packets_seen == g_ld_stats.packets_queued +
+                     g_ld_stats.packets_movie + g_ld_stats.packets_queue_full ? "ok" : "BAD",

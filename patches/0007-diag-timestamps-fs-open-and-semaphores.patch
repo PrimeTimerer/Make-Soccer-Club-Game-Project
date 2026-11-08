@@ -1,0 +1,59 @@
+diff --git a/runtime/ppu/ppu_fs.cpp b/runtime/ppu/ppu_fs.cpp
+index f73907c..c123080 100644
+--- a/runtime/ppu/ppu_fs.cpp
++++ b/runtime/ppu/ppu_fs.cpp
+@@ -26,6 +26,8 @@
+ #include <errno.h>
+ #include <mutex>
+ #include <atomic>
++
++extern "C" unsigned long long ps3_qpc_us(void);   /* [fs] open timestamps */
+ #include <sys/stat.h>
+ #include "../platform/win32_dirent.h"   /* <dirent.h>, or a Win32 stand-in */
+ 
+@@ -334,7 +336,8 @@ static void cellFsOpen(ppu_context* ctx)
+           { const char* want = getenv("FS_STACK");
+             if (want && *want && strstr(gpath, want)) ydkj_host_bt("fs-open");
+           } }
+-      else fprintf(stderr, "[fs] open '%s' -> fd %d\n", gpath, fd); }
++      else { fprintf(stderr, "[fs] open '%s' -> fd %d  t=%.3f tid=%llu\n", gpath, fd,
++                     ps3_qpc_us() / 1e6, (unsigned long long)ctx->thread_id); } }
+     if (getenv("PS3_FSLOG_BT") && strstr(gpath, ".usm")) {
+         /* Resolve to GUEST functions (raw host RVAs are useless here): this tells us
+          * which criMv/criFs function opened the movie, so the reader-attach path
+diff --git a/runtime/syscalls/sys_semaphore.c b/runtime/syscalls/sys_semaphore.c
+index 8b976c0..3719a8b 100644
+--- a/runtime/syscalls/sys_semaphore.c
++++ b/runtime/syscalls/sys_semaphore.c
+@@ -360,10 +360,12 @@ static int64_t sys_semaphore_wait_impl(ppu_context* ctx)
+      * a no-op for a port that does not need it. */
+     { extern void ps3_spu_job_complete_pending(void); ps3_spu_job_complete_pending(); }
+     { static int _n = 0, st = -1; if (st < 0) st = getenv("SEMTID") ? 1 : 0;
+-      if (st && PS3_LOG_FIRST(_n, 60000))
+-        fprintf(stderr, "[WAIT tid=%llu] semaphore_wait(sem=%u timeout=%llu cia=0x%08X lr=0x%08X)\n",
++      if (st && PS3_LOG_FIRST(_n, 60000)) {
++        extern unsigned long long ps3_qpc_us(void);
++        fprintf(stderr, "[WAIT tid=%llu] semaphore_wait(sem=%u timeout=%llu cia=0x%08X lr=0x%08X) t=%.3f\n",
+                 (unsigned long long)ctx->thread_id, sem_id, (unsigned long long)timeout_us,
+-                (unsigned)ctx->cia, (unsigned)ctx->lr);
++                (unsigned)ctx->cia, (unsigned)ctx->lr, ps3_qpc_us() / 1e6);
++      }
+       else if (!st && ps3_log_verbose())
+         fprintf(stderr, "[WAIT] semaphore_wait(sem=%u timeout=%llu)\n", sem_id, (unsigned long long)timeout_us); }
+     /* PS3_BREADCRUMB: every 500th wait, dump the per-tid indirect-call breadcrumb
+@@ -525,9 +527,12 @@ int64_t sys_semaphore_post(ppu_context* ctx)
+     int32_t  count  = LV2_ARG_S32(ctx, 1);
+ 
+     { static int _n=0, st = -1; if (st < 0) st = getenv("SEMTID") ? 1 : 0;
+-      if (st && _n < 60000)
+-        fprintf(stderr, "[WAKE tid=%llu] semaphore_post(sem=%u count=%d)\n",
+-                (unsigned long long)ctx->thread_id, sem_id, count);
++      if (st && _n < 60000) {
++        extern unsigned long long ps3_qpc_us(void);
++        fprintf(stderr, "[WAKE tid=%llu] semaphore_post(sem=%u count=%d) lr=0x%08X t=%.3f\n",
++                (unsigned long long)ctx->thread_id, sem_id, count, (unsigned)ctx->lr,
++                ps3_qpc_us() / 1e6);
++      }
+       else if (!st && _n < 40)
+         fprintf(stderr, "[WAKE] semaphore_post(sem=%u count=%d)\n", sem_id, count);
+       _n++; }

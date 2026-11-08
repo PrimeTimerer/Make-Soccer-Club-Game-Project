@@ -1,0 +1,77 @@
+diff --git a/runtime/spu/spu_channels.c b/runtime/spu/spu_channels.c
+index 5fc5020..0739c73 100644
+--- a/runtime/spu/spu_channels.c
++++ b/runtime/spu/spu_channels.c
+@@ -1762,8 +1762,12 @@ typedef struct {
+     spu_lifted_fn fn;
+     uint32_t id, lsa, rgen, residency;
+     int image, ovl, task;
++    int neg;   /* a remembered miss (fn == NULL): see spu_dcache_neg_on */
+ } spu_dcache_ent;
+-#define SPU_DCACHE_ENTRIES 512u
++/* 512 entries held a 2 KB code window; an interpreted job loop walks more than
++ * that, and every interpreted step asks this cache (the interpreter's rejoin
++ * check), so it is sized for the job code too. */
++#define SPU_DCACHE_ENTRIES 2048u
+ static SPU_TLS spu_dcache_ent t_dcache[SPU_DCACHE_ENTRIES];
+ static uint32_t s_dcache_next_id;
+ static unsigned long long s_dcache_hits, s_dcache_misses, s_dcache_shadow_bad;
+@@ -1789,6 +1793,38 @@ static void spu_dcache_shadow_stats(void)
+                 __atomic_load_n(&s_dcache_misses, __ATOMIC_RELAXED),
+                 __atomic_load_n(&s_dcache_shadow_bad, __ATOMIC_RELAXED));
+ }
++/* Negative entries (on by default; SPU_DCACHE_NEG=0 turns them off). The
++ * interpreter asks spu_lifted_lookup on EVERY step whether it may rejoin lifted
++ * code, and for code that has no lift -- a title's SPURS policy module and job
++ * binaries streamed into LS -- every one of those asks missed and re-ran the
++ * full resolver: up to three registry probes per interpreted instruction. That
++ * held a Sakatsuku command-buffer job to 6-22 ms a frame (the RSX waits on it).
++ * Outside the resident code slots the resolver's answer depends only on the
++ * entry's key (image, overlay, task, registry count), so a miss there is as
++ * exact to remember as a hit. A target inside a resident slot is never
++ * remembered as a miss: the slot may still be pending verification, and the
++ * resolver verifies it lazily on a later ask. */
++static int spu_dcache_neg_on(void)
++{
++    static int s_on = -1;
++    int v = __atomic_load_n(&s_on, __ATOMIC_RELAXED);
++    if (v < 0) {
++        const char* e = getenv("SPU_DCACHE_NEG");
++        v = (e && *e == '0') ? 0 : 1;
++        __atomic_store_n(&s_on, v, __ATOMIC_RELAXED);
++    }
++    return v;
++}
++static int spu_lsa_in_resident_slot(const spu_context* ctx, uint32_t lsa)
++{
++    for (unsigned slot = 0; slot < 4; ++slot)
++        if (ctx->resident_code[slot].image_id &&
++            lsa >= ctx->resident_code[slot].lsa &&
++            lsa - ctx->resident_code[slot].lsa < ctx->resident_code[slot].size)
++            return 1;
++    return 0;
++}
++
+ spu_lifted_fn spu_lifted_lookup(const spu_context* ctx, uint32_t lsa)
+ {
+     const int mode = spu_dcache_mode();
+@@ -1803,7 +1839,7 @@ spu_lifted_fn spu_lifted_lookup(const spu_context* ctx, uint32_t lsa)
+      * a count newer than the registry it saw. */
+     const uint32_t rgen = __atomic_load_n(&s_registry_count, __ATOMIC_ACQUIRE);
+     spu_dcache_ent* e = &t_dcache[((lsa >> 2) ^ (id * 0x9E3779B1u)) & (SPU_DCACHE_ENTRIES - 1)];
+-    if (e->fn && e->id == id && e->lsa == lsa && e->rgen == rgen &&
++    if ((e->fn || e->neg) && e->id == id && e->lsa == lsa && e->rgen == rgen &&
+         e->residency == c->dcache_residency && e->image == c->image_id &&
+         e->ovl == c->resident_ovl && e->task == c->resident_task) {
+         if (mode == 2) {
+@@ -1831,6 +1867,10 @@ spu_lifted_fn spu_lifted_lookup(const spu_context* ctx, uint32_t lsa)
+          * residency it resolved against, read after it. */
+         e->fn = fn; e->id = id; e->lsa = lsa; e->rgen = rgen;
+         e->residency = c->dcache_residency; e->image = c->image_id;
++        e->ovl = c->resident_ovl; e->task = c->resident_task; e->neg = 0;
++    } else if (mode == 1 && spu_dcache_neg_on() && !spu_lsa_in_resident_slot(ctx, lsa)) {
++        e->fn = NULL; e->neg = 1; e->id = id; e->lsa = lsa; e->rgen = rgen;
++        e->residency = c->dcache_residency; e->image = c->image_id;
+         e->ovl = c->resident_ovl; e->task = c->resident_task;
+     }
+     return fn;

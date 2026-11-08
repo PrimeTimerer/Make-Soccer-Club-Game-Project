@@ -1,0 +1,55 @@
+diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
+index afdd93d..b3831f0 100644
+--- a/libs/input/cellPad.c
++++ b/libs/input/cellPad.c
+@@ -49,11 +49,14 @@ static double pad_clock(unsigned long long t0_ms)
+   #define PAD_BACKEND_XINPUT 0
+ #endif
+ 
+-#if PAD_BACKEND_XINPUT
++#if defined(_WIN32)
++  /* Also needed by the keyboard fallback, which serves every Windows backend. */
+   #ifndef WIN32_LEAN_AND_MEAN
+     #define WIN32_LEAN_AND_MEAN
+   #endif
+   #include <windows.h>
++#endif
++#if PAD_BACKEND_XINPUT
+   /* Types only. The exe must not import an XInput DLL: MinGW's libxinput is
+    * xinput1_3.dll, which only the DirectX June 2010 redistributable installs,
+    * so on a stock Windows 10/11 the exe did not start (0xC0000135). The DLL is
+@@ -251,6 +254,8 @@ static u8 pad_xinput_stick_to_u8(short raw, short deadzone)
+     return (u8)val;
+ }
+ 
++#endif /* PAD_BACKEND_XINPUT -- the keyboard fallback below serves any Windows backend */
++
+ /* Keyboard fallback for port 0.
+  *
+  * The only backend here is XInput, so on a machine with no controller plugged
+@@ -325,6 +330,8 @@ static void pad_poll_keyboard(void)
+ }
+ #endif
+ 
++#if PAD_BACKEND_XINPUT
++
+ /* XInputGetState on a slot with nothing plugged in costs about 140 us (2 us on
+  * a connected one), and the backend is polled at least once a frame: three
+  * empty slots beside one pad were 0.6 ms of every frame on God of War HD's
+@@ -643,6 +650,16 @@ static void pad_init_backend(void)
+              * cared. SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS=0 in the
+              * environment still wins over this. */
+             SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
++            /* Windows: no RAWINPUT joystick driver. It takes WM_INPUT on a
++             * helper window of the thread that ran this init, and nothing
++             * here pumps that thread's messages (there is no SDL video), so
++             * every unread report kept a raw-input USER handle: a connected
++             * DualSense used up the process's 10,000 USER handles in ~20 s,
++             * after which no window could be created (Sakatsuku's name-entry
++             * box failed with error 1158). HIDAPI drives DualSense/DualShock
++             * and XInput/WGI the Xbox pads; SDL_JOYSTICK_RAWINPUT=1 in the
++             * environment still turns it back on. */
++            SDL_SetHint(SDL_HINT_JOYSTICK_RAWINPUT, "0");
+             SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER);
+         }
+         s_sdl_inited = 1;

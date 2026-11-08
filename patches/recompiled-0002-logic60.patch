@@ -1,0 +1,63 @@
+diff --git a/recompiled/ppu_recomp_004.cpp b/recompiled/ppu_recomp_004.cpp
+index 3c12571..e283b90 100644
+--- a/recompiled/ppu_recomp_004.cpp
++++ b/recompiled/ppu_recomp_004.cpp
+@@ -51593,6 +51593,7 @@ loc_001943C8:
+         return;
+ }
+ 
++extern "C" int saka_logic60(void);   /* saka_hooks.c (Sakatsuku port) */
+ void func_001943D8(ppu_context* ctx) {
+     PPU_MM_SNAP
+         uint64_t _cs_30 = ctx->gpr[30];
+@@ -51675,7 +51676,7 @@ loc_00194428:
+ loc_001944F0:
+         ctx->gpr[3] = (int64_t)(int32_t)(1);
+         ctx->lr = 0x001944F8; func_006A0E58(ctx); DRAIN_TRAMPOLINE(ctx);
+-        ctx->gpr[3] = (int64_t)(int32_t)(2);
++        ctx->gpr[3] = (int64_t)(int32_t)(saka_logic60() ? 1 : 2);   /* Sakatsuku SAKA_LOGIC60: interval 1 */
+         ctx->lr = 0x00194500; func_0069BEE0(ctx); DRAIN_TRAMPOLINE(ctx);
+         ctx->gpr[3] = (int64_t)(int32_t)(0);
+         ctx->gpr[4] = (int64_t)(int32_t)(0);
+diff --git a/recompiled/ppu_recomp_019.cpp b/recompiled/ppu_recomp_019.cpp
+index 81eee7f..18dabc3 100644
+--- a/recompiled/ppu_recomp_019.cpp
++++ b/recompiled/ppu_recomp_019.cpp
+@@ -45676,6 +45676,7 @@ loc_0069E460:
+         return;
+ }
+ 
++extern "C" int saka_logic60(void);   /* saka_hooks.c (Sakatsuku port) */
+ void func_0069E4FC(ppu_context* ctx) {
+     PPU_MM_SNAP
+         uint64_t _cs_27 = ctx->gpr[27];
+@@ -45822,7 +45823,7 @@ loc_0069E704:
+         ctx->gpr[4] = (int64_t)(int32_t)((uint32_t)0xEA << 16);
+         ctx->gpr[4] = vm_read32(ctx->gpr[4] + 0x40C0);
+         { uint64_t a = (uint32_t)ctx->gpr[4]; uint64_t b = (uint64_t)0x1; uint32_t cr_val = ((a < b) ? 8 : (a > b) ? 4 : 2) | ((ctx->xer >> 31) & 1u); ctx->cr = (ctx->cr & ~(0xFu << 28)) | (cr_val << 28); }
+-        if ((!((ctx->cr >> 30) & 1))) goto loc_0069E77C;
++        if ((!((ctx->cr >> 30) & 1)) && !saka_logic60()) goto loc_0069E77C;   /* Sakatsuku SAKA_LOGIC60: wait one vblank at interval 1 */
+         ctx->gpr[30] = (int64_t)(int32_t)((uint32_t)0x117 << 16);
+         { uint64_t _a = ctx->gpr[4]; uint64_t _r = _a + (uint64_t)(int64_t)(-1); ctx->gpr[3] = _r; ctx->xer = (ctx->xer & ~(1u << 29)) | ((_r < _a) ? (1u << 29) : 0u); }
+         { uint64_t _a = ctx->gpr[30]; uint64_t _r = _a + (uint64_t)(int64_t)(-22264); ctx->gpr[30] = _r; ctx->xer = (ctx->xer & ~(1u << 29)) | ((_r < _a) ? (1u << 29) : 0u); }
+diff --git a/recompiled/ppu_recomp_024.cpp b/recompiled/ppu_recomp_024.cpp
+index 224d85a..5509cf6 100644
+--- a/recompiled/ppu_recomp_024.cpp
++++ b/recompiled/ppu_recomp_024.cpp
+@@ -67932,6 +67932,7 @@ void func_00194380(ppu_context* ctx) {
+         return;
+ }
+ 
++extern "C" int saka_logic60(void);   /* saka_hooks.c (Sakatsuku port) */
+ void func_0019442C(ppu_context* ctx) {
+     PPU_MM_SNAP
+         uint64_t _cs_30 = ctx->gpr[30];
+@@ -67988,7 +67989,7 @@ void func_0019442C(ppu_context* ctx) {
+ loc_001944F0:
+         ctx->gpr[3] = (int64_t)(int32_t)(1);
+         ctx->lr = 0x001944F8; func_006A0E58(ctx); DRAIN_TRAMPOLINE(ctx);
+-        ctx->gpr[3] = (int64_t)(int32_t)(2);
++        ctx->gpr[3] = (int64_t)(int32_t)(saka_logic60() ? 1 : 2);   /* Sakatsuku SAKA_LOGIC60: interval 1 */
+         ctx->lr = 0x00194500; func_0069BEE0(ctx); DRAIN_TRAMPOLINE(ctx);
+         ctx->gpr[3] = (int64_t)(int32_t)(0);
+         ctx->gpr[4] = (int64_t)(int32_t)(0);

@@ -1,0 +1,25 @@
+diff --git a/recompiled/ppu_recomp_020.cpp b/recompiled/ppu_recomp_020.cpp
+index 76f59e2..cb96550 100644
+--- a/recompiled/ppu_recomp_020.cpp
++++ b/recompiled/ppu_recomp_020.cpp
+@@ -20823,6 +20823,7 @@ loc_006DF388:
+         return;
+ }
+ 
++extern "C" int saka_ppu_decode_forced(void);   /* saka_hooks.c (Sakatsuku port) */
+ void func_006DF39C(ppu_context* ctx) {
+     PPU_MM_SNAP
+         uint64_t _cs_24 = ctx->gpr[24];
+@@ -20847,7 +20848,11 @@ void func_006DF39C(ppu_context* ctx) {
+         vm_write64(ctx->gpr[1] + 0x98, ctx->gpr[25]);
+         vm_write64(ctx->gpr[1] + 0x90, ctx->gpr[24]);
+         { int64_t a = (int32_t)ctx->gpr[6]; int64_t b = (int64_t)0; uint32_t cr_val = ((a < b) ? 8 : (a > b) ? 4 : 2) | ((ctx->xer >> 31) & 1u); ctx->cr = (ctx->cr & ~(0xFu << 28)) | (cr_val << 28); }
+-        if (((ctx->cr >> 29) & 1)) goto loc_006DF49C;
++        /* SAKATSUKU PORT (patches/recompiled-0001): take the game's own PPU
++         * decode path (loc_006DF49C, native here) instead of the sl_decoder
++         * SPURS task, which runs in the SPU interpreter (28-48 ms a file).
++         * SAKA_PPU_DECODE=0 restores the SPU task. */
++        if (((ctx->cr >> 29) & 1) || saka_ppu_decode_forced()) goto loc_006DF49C;
+         ctx->gpr[6] = vm_read32(ctx->gpr[3] + 0x0);
+         ctx->gpr[6] = ppc_rlw64(ctx->gpr[6], 0, 28, 31, 0, 0);
+         { int64_t a = (int32_t)ctx->gpr[6]; int64_t b = (int64_t)0; uint32_t cr_val = ((a < b) ? 8 : (a > b) ? 4 : 2) | ((ctx->xer >> 31) & 1u); ctx->cr = (ctx->cr & ~(0xFu << 28)) | (cr_val << 28); }

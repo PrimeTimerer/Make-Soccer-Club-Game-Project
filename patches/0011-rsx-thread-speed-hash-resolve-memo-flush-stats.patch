@@ -1,0 +1,293 @@
+diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
+index d5636f5..7431704 100644
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -1165,6 +1165,13 @@ static void nv3089_blit(void)
+                                         dst_pitch, out_x, out_y, out_w, out_h);
+         if (!rok && s_nv3089.in_uv <= 0x00100010u && !s_nv3089.out_pt)
+             rsx_live_draw_note_resolve(sl, s_nv3089.in_off, dl, s_gcm2d.dst_offset);
++        /* The GPU did the resolve: its source exists only on the GPU, so the
++         * guest-memory copy below would scale bytes nothing drew -- in the
++         * Sakatsuku match, 2560x1440 -> 1280x720 twice a frame, 8.5% of the
++         * frame-clock thread. NV3089_CPU_RESOLVE=1 keeps the CPU copy too. */
++        { static int cpu = -1;
++          if (cpu < 0) { const char* e = getenv("NV3089_CPU_RESOLVE"); cpu = (e && *e == '1') ? 1 : 0; }
++          if (rok && !cpu) return; }
+     }
+     /* Only the 32-bit colour formats are handled; anything else would need a
+      * per-format converter and is better skipped loudly than written wrong. */
+diff --git a/libs/video/rsx_live_draw.c b/libs/video/rsx_live_draw.c
+index 0c7133d..8134f70 100644
+--- a/libs/video/rsx_live_draw.c
++++ b/libs/video/rsx_live_draw.c
+@@ -55,6 +55,7 @@ void rsx_live_draw_present_rgba(const uint8_t* r, u32 w, u32 h) { (void)r; (void
+ u32  rsx_live_draw_get_frames(void) { return 0; }
+ void* rsx_live_draw_get_present_thread_handle(void) { return NULL; }
+ u32  rsx_live_draw_get_last_draws(void) { return 0; }
++unsigned long long rsx_live_draw_fence_wait_us(unsigned* w) { if (w) *w = 0; return 0; }
+ double rsx_live_draw_get_present_fps(void) { return 0.0; }
+ void rsx_live_draw_dump_present_samples(void) {}
+ void rsx_live_draw_a010_probe_begin(void) {}
+@@ -584,6 +585,9 @@ static ld_present_sample g_ld_present_ring[LD_PRESENT_RING_CAP];
+ static u64 g_ld_present_total = 0;
+ static LONGLONG g_ld_qpc_frequency = 0;
+ static int g_ld_present_dumped = 0;
++static LONGLONG ld_slow_qpc(void);                 /* defined with ld_slow_note */
++static unsigned long long g_ld_fence_wait_us = 0;  /* GPU fence waits in flushes */
++static unsigned g_ld_fence_waits = 0;
+ static int g_ld_schedule_diag = 0;
+ #if defined(YZ_PPU_SAMPLE)
+ static HANDLE g_ld_present_thread_handle = NULL;
+@@ -1728,6 +1732,24 @@ static void ld_flush(ld_flush_reason reason)
+ #else
+     (void)reason;
+ #endif
++    /* Always on, every 5 s: how many synchronous flushes (each waits for the
++     * GPU) each reason caused -- a ring that overflows mid-frame shows up here. */
++    { static unsigned cnt[LD_FLUSH_REASON_COUNT]; static LONGLONG t0, f;
++      LARGE_INTEGER now; QueryPerformanceCounter(&now);
++      if (!f) { LARGE_INTEGER q; QueryPerformanceFrequency(&q); f = q.QuadPart; t0 = now.QuadPart; }
++      if ((unsigned)reason < LD_FLUSH_REASON_COUNT) cnt[reason]++;
++      if (now.QuadPart - t0 >= 5 * f) {
++          static const char* nm[LD_FLUSH_REASON_COUNT] = { "present", "guest_ref", "vertex_ring", "vconst_ring",
++              "retire", "movie", "movie_present", "readback", "pconst_ring", "descriptor_ring", "shutdown" };
++          char line[400]; int n = 0;
++          for (int i = 0; i < LD_FLUSH_REASON_COUNT; i++)
++              if (cnt[i]) n += snprintf(line + n, sizeof line - n, " %s=%u", nm[i], cnt[i]);
++          extern unsigned g_ld_memo_stats[4];
++          fprintf(stderr, "[ld-flush] last 5 s:%s  memo vp %u/%u fp %u/%u (hit/miss)\n", n ? line : " none",
++                  g_ld_memo_stats[0], g_ld_memo_stats[1], g_ld_memo_stats[2], g_ld_memo_stats[3]);
++          memset(g_ld_memo_stats, 0, sizeof g_ld_memo_stats);
++          memset(cnt, 0, sizeof cnt); t0 = now.QuadPart;
++      } }
+     const HRESULT close_hr = g.list->lpVtbl->Close(g.list);
+     if (FAILED(close_hr)) {
+         fprintf(stderr,
+@@ -1766,7 +1788,11 @@ static void ld_flush(ld_flush_reason reason)
+             g.ready = 0;
+             return;
+         }
+-        WaitForSingleObject(g.fence_event, INFINITE);
++        { const LONGLONG fw0 = ld_slow_qpc();
++          WaitForSingleObject(g.fence_event, INFINITE);
++          static LARGE_INTEGER fwf; if (!fwf.QuadPart) QueryPerformanceFrequency(&fwf);
++          g_ld_fence_wait_us += (unsigned long long)((ld_slow_qpc() - fw0) * 1000000 / fwf.QuadPart);
++          g_ld_fence_waits++; }
+ #if defined(YZ_PERF_PROFILE)
+         const u64 wait_ticks = (u64)(ld_profile_qpc() - wait_begin);
+         g_ld_profile.total.fence_wait_qpc += wait_ticks;
+@@ -2125,15 +2151,23 @@ static u64 texture_content_hash(const rsx_dsp_texture* t, int* readable)
+       } }
+ 
+     /* One hash per cached texture per presented frame.  Word-at-a-time FNV is
+-     * deliberately cheap; this is a mutation detector, not a content ID. */
+-    u64 hash = 1469598103934665603ull;
++     * deliberately cheap; this is a mutation detector, not a content ID.
++     * Four independent FNV lanes over 32-byte strides: the single multiply
++     * chain was latency-bound, and with every texture of a match scene
++     * re-hashed each frame it cost 12% of the frame-clock thread. Every word
++     * still feeds one lane, so any rewrite still changes the result. */
++    u64 h0 = 1469598103934665603ull, h1 = 0x9E3779B97F4A7C15ull,
++        h2 = 0xC2B2AE3D27D4EB4Full, h3 = 0x165667B19E3779F9ull;
+     u32 i = 0;
+-    for (; i + 8 <= span; i += 8) {
+-        u64 word;
+-        memcpy(&word, src + i, sizeof(word));
+-        hash ^= word;
+-        hash *= 1099511628211ull;
+-    }
++    for (; i + 32 <= span; i += 32) {
++        u64 w[4];
++        memcpy(w, src + i, sizeof(w));
++        h0 = (h0 ^ w[0]) * 1099511628211ull;
++        h1 = (h1 ^ w[1]) * 1099511628211ull;
++        h2 = (h2 ^ w[2]) * 1099511628211ull;
++        h3 = (h3 ^ w[3]) * 1099511628211ull;
++    }
++    u64 hash = h0 ^ ((h1 << 17) | (h1 >> 47)) ^ ((h2 << 31) | (h2 >> 33)) ^ ((h3 << 47) | (h3 >> 17));
+     for (; i < span; i++) {
+         hash ^= src[i];
+         hash *= 1099511628211ull;
+@@ -4667,6 +4701,97 @@ static ID3D12PipelineState* build_pso(
+     return SUCCEEDED(hr) ? pso : NULL;
+ }
+ 
++/* Per-draw program facts, memoised. Every draw scanned the vertex program for
++ * its END bit, analysed its inputs, scanned it for TXL and hashed it, and
++ * hashed the fragment program: about 10% of the frame-clock thread in a match.
++ * An entry is reused only while the program's bytes are unchanged (memcmp
++ * against a stored copy), so a re-upload or a patched constant is always seen
++ * and every result equals a fresh computation. LD_NO_PROGRAM_MEMO=1 disables. */
++typedef struct {
++    u32 start, instrs, input_mask, txl_mask;
++    u64 hash;
++    u8  bytes[RSX_DSP_VP_INSTR * 16];
++} ld_vp_memo;
++typedef struct {
++    u32 loc, off, size;
++    int buffered;
++    u64 seed, key;
++    u8  bytes[4096];
++} ld_fp_memo;
++#define LD_VP_MEMO_N 16u
++#define LD_FP_MEMO_N 32u
++static ld_vp_memo g_vp_memo[LD_VP_MEMO_N];
++static ld_fp_memo g_fp_memo[LD_FP_MEMO_N];
++static unsigned g_vp_memo_next, g_fp_memo_next;
++unsigned g_ld_memo_stats[4];   /* vp hit, vp miss, fp hit, fp miss ([ld-flush] line) */
++
++static int ld_program_memo_enabled(void)
++{
++    static int on = -1;
++    if (on < 0) on = getenv("LD_NO_PROGRAM_MEMO") ? 0 : 1;
++    return on;
++}
++
++static const ld_vp_memo* ld_vp_facts(u32 start)
++{
++    const u8* vp_uc = (const u8*)(g.rsx.vp + start * 4);
++    const int memo = ld_program_memo_enabled();
++    if (memo)
++        for (unsigned i = 0; i < LD_VP_MEMO_N; i++) {
++            const ld_vp_memo* m = &g_vp_memo[i];
++            if (m->instrs && m->start == start && !memcmp(m->bytes, vp_uc, m->instrs * 16u)) {
++                g_ld_memo_stats[0]++;
++                return m;
++            }
++        }
++    g_ld_memo_stats[1]++;
++    static ld_vp_memo scratch;
++    const u32 instrs = rsx_vp_program_size_instrs(vp_uc, (RSX_DSP_VP_INSTR - start) * 16);
++    if (!instrs) return NULL;
++    ld_vp_memo* m = memo ? &g_vp_memo[g_vp_memo_next++ % LD_VP_MEMO_N] : &scratch;
++    rsx_vp_input_analysis analysis = {0xFFFFu, 0};
++    if (rsx_vp_analyze_inputs(vp_uc, instrs * 16, &analysis) != (int)instrs || !analysis.exact)
++        analysis.input_mask = 0xFFFFu;
++    m->start = start;
++    m->input_mask = analysis.input_mask;
++    m->txl_mask = vp_txl_unit_mask(vp_uc, instrs);
++    m->hash = fnv1a(vp_uc, instrs * 16, 1469598103934665603ull);
++    memcpy(m->bytes, vp_uc, instrs * 16u);
++    m->instrs = instrs;
++    return m;
++}
++
++/* Fragment program size and the PSO key folded from `seed` (the vertex
++ * program's hash), exactly as get_pso computed them. 0 = no END bit. */
++static u32 ld_fp_facts(u32 loc, u32 off, const u8* fp_uc, u64 seed, u64* key_out)
++{
++    const int buffered = ld_fp_constants_buffered();
++    const int memo = ld_program_memo_enabled();
++    if (memo)
++        for (unsigned i = 0; i < LD_FP_MEMO_N; i++) {
++            const ld_fp_memo* m = &g_fp_memo[i];
++            if (m->size && m->loc == loc && m->off == off && m->seed == seed &&
++                m->buffered == buffered && !memcmp(m->bytes, fp_uc, m->size)) {
++                g_ld_memo_stats[2]++;
++                *key_out = m->key;
++                return m->size;
++            }
++        }
++    g_ld_memo_stats[3]++;
++    const u32 size = rsx_fp_program_size(fp_uc, 0x10000);
++    if (!size) return 0;
++    const u64 key = buffered ? rsx_fp_structural_hash(fp_uc, size, seed) : fnv1a(fp_uc, size, seed);
++    if (memo && size <= sizeof g_fp_memo[0].bytes) {
++        ld_fp_memo* m = &g_fp_memo[g_fp_memo_next++ % LD_FP_MEMO_N];
++        m->size = 0;
++        m->loc = loc; m->off = off; m->seed = seed; m->buffered = buffered; m->key = key;
++        memcpy(m->bytes, fp_uc, size);
++        m->size = size;
++    }
++    *key_out = key;
++    return size;
++}
++
+ static int ld_current_vertex_layout(rsx_vertex_layout_plan* layout)
+ {
+     const u32 start = rsx_dsp_vp_start(&g.rsx);
+@@ -4674,17 +4799,9 @@ static int ld_current_vertex_layout(rsx_vertex_layout_plan* layout)
+         ld_layout_plan_get(0xFFFFu, layout);
+         return 0;
+     }
+-    const u8* vp_uc = (const u8*)(g.rsx.vp + start * 4);
+-    const u32 vp_instrs = rsx_vp_program_size_instrs(
+-        vp_uc, (RSX_DSP_VP_INSTR - start) * 16);
+-    rsx_vp_input_analysis analysis = {0xFFFFu, 0};
+-    if (!vp_instrs ||
+-        rsx_vp_analyze_inputs(
+-            vp_uc, vp_instrs * 16, &analysis) != (int)vp_instrs ||
+-        !analysis.exact)
+-        analysis.input_mask = 0xFFFFu;
+-    ld_layout_plan_get(analysis.input_mask, layout);
+-    return vp_instrs != 0;
++    const ld_vp_memo* vm = ld_vp_facts(start);
++    ld_layout_plan_get(vm ? vm->input_mask : 0xFFFFu, layout);
++    return vm != NULL;
+ }
+ 
+ /* LD_PSO_DBG=1: name the first bail-out of each kind in get_pso(). Every exit
+@@ -4711,14 +4828,16 @@ static ID3D12PipelineState* get_pso(
+     const u32 start = rsx_dsp_vp_start(&g.rsx);
+     if (start >= RSX_DSP_VP_INSTR) { LD_PSO_BAIL("no vertex program uploaded (vp start out of range)"); return NULL; }
+     const u8* vp_uc = (const u8*)(g.rsx.vp + start * 4);
+-    const u32 vp_instrs = rsx_vp_program_size_instrs(vp_uc, (RSX_DSP_VP_INSTR - start) * 16);
+-    if (!vp_instrs) { LD_PSO_BAIL("vertex program has zero instructions"); return NULL; }
++    const ld_vp_memo* vm = ld_vp_facts(start);
++    if (!vm) { LD_PSO_BAIL("vertex program has zero instructions"); return NULL; }
++    const u32 vp_instrs = vm->instrs;
+ 
+     u32 fp_loc = 0;
+     const u32 fp_off = rsx_dsp_fragment_program(&g.rsx, &fp_loc);
+     const u8* fp_uc = guest_ptr(fp_loc, fp_off, 16);
+     if (!fp_uc) { LD_PSO_BAIL("fragment program address does not resolve to guest memory"); return NULL; }
+-    const u32 fp_size = rsx_fp_program_size(fp_uc, 0x10000);
++    u64 fp_key = 0;
++    const u32 fp_size = ld_fp_facts(fp_loc, fp_off, fp_uc, vm->hash, &fp_key);
+     if (!fp_size) {
+         /* No END-bit instruction in 64 KB: the bytes at (location, offset) are
+          * not a fragment program. Almost always the LOCATION is wrong, not the
+@@ -4779,7 +4898,7 @@ static ID3D12PipelineState* get_pso(
+             cube_mask |= 1u << unit;
+     }
+     const u32 vtex_mask = vertex_texture_mask();
+-    const u32 txl_mask = vp_txl_unit_mask(vp_uc, vp_instrs);
++    const u32 txl_mask = vm->txl_mask;
+     if (txl_mask && !(txl_mask & vtex_mask)) {
+         g_ld_vtex_missing_for_txl++;
+         static u32 warned = 0;
+@@ -4815,12 +4934,9 @@ static ID3D12PipelineState* get_pso(
+     g.fp_alpha_ref = rsx_fp_alpha_ref(
+         rs.alpha_ref_raw, rs.alpha_ref_format);
+ 
+-    u64 key = fnv1a(
+-        vp_uc, vp_instrs * 16, 1469598103934665603ull);
+-    if (ld_fp_constants_buffered())
+-        key = rsx_fp_structural_hash(fp_uc, fp_size, key);
+-    else
+-        key = fnv1a(fp_uc, fp_size, key);
++    /* = fnv1a(vp) folded through the fragment program's structural (or full)
++     * hash, from the memo (ld_vp_facts / ld_fp_facts). */
++    u64 key = fp_key;
+     if (!key) {
+         LD_PSO_BAIL("shader hash collapsed to zero");
+         return NULL;
+@@ -4897,8 +5013,7 @@ static ID3D12PipelineState* get_pso(
+ #endif
+     g_ld_current_pso.valid = 1;
+     g_ld_current_pso.key = key;
+-    g_ld_current_pso.vp_hash = fnv1a(
+-        vp_uc, vp_instrs * 16, 1469598103934665603ull);
++    g_ld_current_pso.vp_hash = vm->hash;   /* = fnv1a(vp_uc, vp_instrs * 16, FNV offset) */
+     g_ld_current_pso.vp_start = start;
+     g_ld_current_pso.vp_instrs = vp_instrs;
+     g_ld_current_pso.fp_location = fp_loc;
+@@ -8834,6 +8949,8 @@ static u32 g_ld_last_frame_draws = 0;
+  * "presenting fresh content" from "flipping a static image" -- the dead
+  * journal-consumer limp state renders ~0 draws/frame while flips tick). */
+ u32 rsx_live_draw_get_last_draws(void) { return g_ld_last_frame_draws; }
++/* CPU time spent waiting on the GPU fence in flushes (us, count): [perf] in main.cpp. */
++unsigned long long rsx_live_draw_fence_wait_us(unsigned* waits) { if (waits) *waits = g_ld_fence_waits; return g_ld_fence_wait_us; }
+ 
+ double rsx_live_draw_get_present_fps(void)
+ {

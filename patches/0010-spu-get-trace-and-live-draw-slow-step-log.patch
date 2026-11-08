@@ -1,0 +1,96 @@
+diff --git a/libs/video/rsx_live_draw.c b/libs/video/rsx_live_draw.c
+index 2e4ba57..0c7133d 100644
+--- a/libs/video/rsx_live_draw.c
++++ b/libs/video/rsx_live_draw.c
+@@ -2390,6 +2390,25 @@ static ID3D12Resource* decode_guest_texture(const rsx_dsp_texture* t, u32 remap)
+     return resource;
+ }
+ 
++/* Always on: one line for any single draw-path setup step (texture decode,
++ * shader compile, PSO create) over 20 ms, plus running totals, so a multi-second
++ * "frame clock STUCK" freeze has a name. LD_SLOW_MS changes the threshold. */
++static LONGLONG ld_slow_qpc(void) { LARGE_INTEGER t; QueryPerformanceCounter(&t); return t.QuadPart; }
++static void ld_slow_note(const char* what, LONGLONG t0, u32 a, u32 b)
++{
++    static LARGE_INTEGER f; static double thr = -1.0;
++    static volatile LONG lines; static double total_ms[4]; static u32 count[4];
++    if (!f.QuadPart) QueryPerformanceFrequency(&f);
++    if (thr < 0) { const char* e = getenv("LD_SLOW_MS"); thr = e ? atof(e) : 20.0; }
++    const double ms = (double)(ld_slow_qpc() - t0) * 1000.0 / (double)f.QuadPart;
++    const int k = what[0] == 't' ? 0 : what[0] == 'v' ? 1 : (what[0] == 'p' && what[2] == ' ') ? 2 : 3;
++    total_ms[k] += ms; count[k]++;
++    if (ms >= thr && InterlockedIncrement(&lines) <= 400)
++        fprintf(stderr, "[slow] %s %.1f ms (0x%X %ux%u) totals: tex %u/%.0fms vs %u/%.0fms ps %u/%.0fms pso %u/%.0fms\n",
++                what, ms, a, b >> 16, b & 0xFFFF, count[0], total_ms[0], count[1], total_ms[1],
++                count[2], total_ms[2], count[3], total_ms[3]);
++}
++
+ static ID3D12Resource* decode_guest_texture_profiled(
+     const rsx_dsp_texture* texture, u32 remap)
+ {
+@@ -2397,7 +2416,10 @@ static ID3D12Resource* decode_guest_texture_profiled(
+     const LONGLONG begin = ld_profile_qpc();
+     g_ld_profile.total.texture_decode_calls++;
+ #endif
++    const LONGLONG slow_t0 = ld_slow_qpc();
+     ID3D12Resource* result = decode_guest_texture(texture, remap);
++    ld_slow_note("tex decode", slow_t0, texture->offset,
++                 ((u32)texture->width << 16) | ((u32)texture->height & 0xFFFFu));
+ #if defined(YZ_PERF_PROFILE)
+     g_ld_profile.total.texture_decode_qpc +=
+         (u64)(ld_profile_qpc() - begin);
+@@ -4491,9 +4513,11 @@ static ID3D12PipelineState* build_pso(
+                 const char* e = getenv("RSX_VS_COMPILE_OPT");
+                 vs_flags = (e && *e == '1') ? 0u : D3DCOMPILE_SKIP_OPTIMIZATION;
+             }
++            const LONGLONG slow_vs = ld_slow_qpc();
+             vs_hr = D3DCompile(
+                 vs_hlsl, vs_length, "xvs", NULL, NULL, "main",
+                 "vs_5_0", vs_flags, 0, &vs, &err);
++            ld_slow_note("vs compile", slow_vs, (u32)vs_length, 0);
+ #if defined(YZ_PERF_PROFILE)
+             g_ld_profile.total.vs_compile_qpc +=
+                 (u64)(ld_profile_qpc() - compile_begin);
+@@ -4553,9 +4577,11 @@ static ID3D12PipelineState* build_pso(
+             g_ld_profile.total.ps_compile_calls++;
+             const LONGLONG compile_begin = ld_profile_qpc();
+ #endif
++            const LONGLONG slow_ps = ld_slow_qpc();
+             ps_hr = D3DCompile(
+                 ps_hlsl, ps_length, "xps", NULL, NULL, "main",
+                 "ps_5_0", 0, 0, &ps, &err);
++            ld_slow_note("ps compile", slow_ps, (u32)ps_length, 0);
+ #if defined(YZ_PERF_PROFILE)
+             g_ld_profile.total.ps_compile_qpc +=
+                 (u64)(ld_profile_qpc() - compile_begin);
+@@ -4616,8 +4642,10 @@ static ID3D12PipelineState* build_pso(
+     g_ld_profile.total.create_pso_calls++;
+     const LONGLONG create_begin = ld_profile_qpc();
+ #endif
++    const LONGLONG slow_pso = ld_slow_qpc();
+     HRESULT hr = g.dev->lpVtbl->CreateGraphicsPipelineState(
+         g.dev, &pd, &IID_ID3D12PipelineState, (void**)&pso);
++    ld_slow_note("pso create", slow_pso, (u32)pd.VS.BytecodeLength, 0);
+ #if defined(YZ_PERF_PROFILE)
+     g_ld_profile.total.create_pso_qpc +=
+         (u64)(ld_profile_qpc() - create_begin);
+diff --git a/runtime/spu/spu_channels.c b/runtime/spu/spu_channels.c
+index 0739c73..0adbdf0 100644
+--- a/runtime/spu/spu_channels.c
++++ b/runtime/spu/spu_channels.c
+@@ -2173,6 +2173,15 @@ void spu_overlay_note_get(spu_context* ctx, uint32_t ea, const uint8_t* ls, uint
+ {
+     uint32_t lsa = (uint32_t)(ls - ctx->ls);
+     spu_ovl_dump(ctx, ea, lsa, ls, size);
++    /* SPU_GET_TRACE=<lo>-<hi>: the first 300 GETs from that EA range, with
++     * their LS destination (where a job loader puts code it streams in). */
++    { static int on = -1; static uint32_t lo, hi;
++      if (on < 0) { const char* e = getenv("SPU_GET_TRACE"); on = e && *e;
++          if (on) { char* p; lo = (uint32_t)strtoul(e, &p, 0); hi = (*p == '-') ? (uint32_t)strtoul(p + 1, 0, 0) : lo + 0x100000u; } }
++      if (on && ea >= lo && ea < hi) { static long n;
++          if (__atomic_add_fetch(&n, 1, __ATOMIC_RELAXED) <= 300)
++              fprintf(stderr, "[spu-get] img=%d spu=%u ea=0x%08X -> ls 0x%05X size=0x%X\n",
++                      ctx->image_id, ctx->spu_id, ea, lsa, size); } }
+     for (unsigned slot = 0; slot < 4; ++slot) {
+         if (!ctx->resident_code[slot].image_id) continue;
+         uint32_t base = ctx->resident_code[slot].lsa;

@@ -1,0 +1,401 @@
+diff --git a/libs/misc/cellOskDialog.c b/libs/misc/cellOskDialog.c
+index 17e7c67..757713f 100644
+--- a/libs/misc/cellOskDialog.c
++++ b/libs/misc/cellOskDialog.c
+@@ -12,6 +12,42 @@
+ #include <string.h>
+ #include "../../runtime/ppu/ppu_memory.h"   /* vm_write*: guest EA -> host, byte-swapped */
+ #include "../guest_struct.h"   /* GUEST_EA, vm_read/vm_write: guest EA -> host */
++#include <stdlib.h>
++#ifdef _WIN32
++#  ifndef WIN32_LEAN_AND_MEAN
++#    define WIN32_LEAN_AND_MEAN
++#  endif
++#  include <windows.h>
++#endif
++
++/* ---------------------------------------------------------------------------
++ * Host text input (Windows)
++ *
++ * The PS3 shows its on-screen keyboard over the game and reports through
++ * sysutil events: LOADED after LoadAsync, FINISHED when the user confirms or
++ * cancels, UNLOADED after UnloadAsync. The stub returned at once and sent
++ * none of them, so a title that waits for FINISHED (Sakatsuku's name entry)
++ * sat on a black screen forever. Here LoadAsync opens a small native window
++ * with an edit box -- Unicode, so the system IME types Japanese or Korean --
++ * on a host thread; FINISHED is queued from the guest's next
++ * cellSysutilCheckCallback once the user presses OK/Enter or Cancel/Esc.
++ * PS3_OSK_TEXT=<text> answers without a window (headless runs).
++ * -----------------------------------------------------------------------*/
++#define CELL_SYSUTIL_OSKDIALOG_LOADED   0x0502
++#define CELL_SYSUTIL_OSKDIALOG_FINISHED 0x0503
++#define CELL_SYSUTIL_OSKDIALOG_UNLOADED 0x0504
++void cellSysutilQueueEvent(int slot, uint32_t status, uint32_t param);   /* cellSysutil.c */
++unsigned long long ps3_qpc_us(void);   /* cellGcmSys.c: log timestamps */
++
++static void osk_broadcast(u32 status)
++{
++    for (int slot = 0; slot < 4 /* CELL_SYSUTIL_MAX_CALLBACKS */; ++slot)
++        cellSysutilQueueEvent(slot, status, 0);
++}
++
++/* 0 idle, 1 window open, 2 answered (FINISHED not yet queued), 3 finished */
++static volatile long s_osk_state = 0;
++static s32 s_osk_result_code = 0;    /* CELL_OSK_DIALOG_INPUT_FIELD_RESULT_* */
+ 
+ /* ---------------------------------------------------------------------------
+  * Internal state
+@@ -25,6 +61,163 @@ static char s_default_response[CELL_OSK_MAX_TEXT_LENGTH + 1] = "";
+ static CellOskDialogChar s_result_text[CELL_OSK_MAX_TEXT_LENGTH + 1];
+ static u32               s_result_length = 0;
+ 
++#ifdef _WIN32
++static WCHAR  s_osk_prompt[CELL_OSK_MAX_TEXT_LENGTH + 1];
++static WCHAR  s_osk_init[CELL_OSK_MAX_TEXT_LENGTH + 1];
++static WCHAR  s_osk_typed[CELL_OSK_MAX_TEXT_LENGTH + 1];
++static u32    s_osk_limit = CELL_OSK_MAX_TEXT_LENGTH;
++static int    s_osk_ok = 0;
++static HWND   s_osk_hwnd = NULL, s_osk_edit = NULL;
++
++static BOOL CALLBACK osk_find_game(HWND h, LPARAM lp)
++{
++    DWORD pid = 0; GetWindowThreadProcessId(h, &pid);
++    if (pid == GetCurrentProcessId() && IsWindowVisible(h) && h != s_osk_hwnd) {
++        *(HWND*)lp = h; return FALSE;
++    }
++    return TRUE;
++}
++
++static ULONGLONG s_osk_t0 = 0;   /* when the input window became usable */
++
++static LRESULT CALLBACK osk_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
++{
++    switch (m) {
++    case WM_COMMAND:
++        if (LOWORD(w) == IDOK || LOWORD(w) == IDCANCEL) {
++            s_osk_ok = LOWORD(w) == IDOK;
++            if (s_osk_ok && s_osk_edit)
++                GetWindowTextW(s_osk_edit, s_osk_typed, CELL_OSK_MAX_TEXT_LENGTH + 1);
++            printf("[cellOskDialog] %s pressed after %llu ms\n", s_osk_ok ? "OK" : "Cancel",
++                   (unsigned long long)(GetTickCount64() - s_osk_t0));
++            DestroyWindow(h);
++            return 0;
++        }
++        break;
++    case WM_CLOSE:
++        printf("[cellOskDialog] window closed after %llu ms\n",
++               (unsigned long long)(GetTickCount64() - s_osk_t0));
++        s_osk_ok = 0;
++        DestroyWindow(h);
++        return 0;
++    case WM_DESTROY:
++        PostQuitMessage(0);
++        return 0;
++    }
++    return DefWindowProcW(h, m, w, l);
++}
++
++static DWORD WINAPI osk_thread(LPVOID unused)
++{
++    (void)unused;
++    HINSTANCE hi = GetModuleHandleW(NULL);
++    static int registered = 0;
++    if (!registered) {
++        WNDCLASSEXW wc; memset(&wc, 0, sizeof wc);
++        wc.cbSize = sizeof wc; wc.lpfnWndProc = osk_wndproc; wc.hInstance = hi;
++        wc.hCursor = LoadCursor(NULL, IDC_ARROW);
++        wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
++        wc.lpszClassName = L"SakaOskDialog";
++        if (!RegisterClassExW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS)
++            printf("[cellOskDialog] RegisterClassExW failed (error %lu)\n", GetLastError());
++        registered = 1;
++    }
++    const int W = 620, H = 190;
++    /* Centre on the game window (the D3D12 window class first: the first
++     * visible window of the process can be a minimised console, whose rect
++     * is at -32000), then keep the box inside a monitor's work area. */
++    HWND game = FindWindowA("ps3recomp_d3d12", NULL);
++    if (!game) EnumWindows(osk_find_game, (LPARAM)&game);
++    RECT r = { 0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN) };
++    if (game && !IsIconic(game)) GetWindowRect(game, &r);
++    POINT c = { (r.left + r.right) / 2, (r.top + r.bottom) / 2 };
++    MONITORINFO mi; memset(&mi, 0, sizeof mi); mi.cbSize = sizeof mi;
++    if (GetMonitorInfoW(MonitorFromPoint(c, MONITOR_DEFAULTTOPRIMARY), &mi)) {
++        if (c.x < mi.rcWork.left + W / 2)   c.x = mi.rcWork.left + W / 2;
++        if (c.x > mi.rcWork.right - W / 2)  c.x = mi.rcWork.right - W / 2;
++        if (c.y < mi.rcWork.top + H / 2)    c.y = mi.rcWork.top + H / 2;
++        if (c.y > mi.rcWork.bottom - H / 2) c.y = mi.rcWork.bottom - H / 2;
++    }
++    const int x = c.x - W / 2, y = c.y - H / 2;
++    s_osk_typed[0] = 0; s_osk_ok = 0;
++    /* caption: U+5165 U+529B (input) */
++    s_osk_hwnd = CreateWindowExW(WS_EX_DLGMODALFRAME | WS_EX_TOPMOST | WS_EX_CONTROLPARENT,
++        L"SakaOskDialog", L"\x5165\x529B (Text input)", WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
++        x, y, W, H, NULL, NULL, hi, NULL);
++    if (!s_osk_hwnd) {   /* no window: answer with the initial text */
++        printf("[cellOskDialog] CreateWindowExW failed (error %lu): answering with the initial text\n",
++               GetLastError());
++        lstrcpynW(s_osk_typed, s_osk_init, CELL_OSK_MAX_TEXT_LENGTH + 1); s_osk_ok = 1;
++    } else {
++        printf("[cellOskDialog] input window at (%d,%d) %dx%d, game window %p t=%.3f\n", x, y, W, H,
++               (void*)game, ps3_qpc_us() / 1e6);
++        HFONT f = CreateFontW(-20, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0,
++                              CLEARTYPE_QUALITY, 0, L"Meiryo UI");
++        RECT cr; GetClientRect(s_osk_hwnd, &cr);
++        const int cw = cr.right - cr.left;
++        HWND lbl = CreateWindowExW(0, L"STATIC", s_osk_prompt[0] ? s_osk_prompt : L"",
++            WS_CHILD | WS_VISIBLE, 16, 12, cw - 32, 28, s_osk_hwnd, NULL, hi, NULL);
++        s_osk_edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", s_osk_init,
++            WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, 16, 46, cw - 32, 34,
++            s_osk_hwnd, (HMENU)(INT_PTR)100, hi, NULL);
++        HWND ok = CreateWindowExW(0, L"BUTTON", L"OK", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
++            cw - 236, 96, 104, 36, s_osk_hwnd, (HMENU)(INT_PTR)IDOK, hi, NULL);
++        HWND ca = CreateWindowExW(0, L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
++            cw - 120, 96, 104, 36, s_osk_hwnd, (HMENU)(INT_PTR)IDCANCEL, hi, NULL);
++        HWND kids[4] = { lbl, s_osk_edit, ok, ca };
++        for (int i = 0; i < 4; i++) if (kids[i] && f) SendMessageW(kids[i], WM_SETFONT, (WPARAM)f, TRUE);
++        SendMessageW(s_osk_edit, EM_SETLIMITTEXT, (WPARAM)s_osk_limit, 0);
++        SendMessageW(s_osk_edit, EM_SETSEL, 0, -1);
++        SetForegroundWindow(s_osk_hwnd);
++        SetFocus(s_osk_edit);
++        s_osk_t0 = GetTickCount64();
++        MSG msg;
++        int keylog = 0;
++        while (GetMessageW(&msg, NULL, 0, 0) > 0) {
++            if (msg.message == WM_KEYDOWN || msg.message == WM_SYSKEYDOWN) {
++                const ULONGLONG dt = GetTickCount64() - s_osk_t0;
++                const int rep = (int)((msg.lParam >> 30) & 1);
++                if (keylog < 24) {
++                    keylog++;
++                    printf("[cellOskDialog] key 0x%02X%s +%llu ms\n", (unsigned)msg.wParam,
++                           rep ? " (repeat)" : "", (unsigned long long)dt);
++                }
++                /* The Enter/Esc that picked the field (still held, or its
++                 * auto-repeat) must not confirm or cancel the empty box the
++                 * moment it opens: only a fresh press after 300 ms counts. */
++                if ((msg.wParam == VK_RETURN || msg.wParam == VK_ESCAPE) && (rep || dt < 300))
++                    continue;
++            }
++            if (!IsDialogMessageW(s_osk_hwnd, &msg)) { TranslateMessage(&msg); DispatchMessageW(&msg); }
++        }
++        if (f) DeleteObject(f);
++        s_osk_hwnd = NULL; s_osk_edit = NULL;
++        if (game && IsWindow(game)) SetForegroundWindow(game);   /* back to the game */
++    }
++    u32 n = 0;
++    if (s_osk_ok)
++        for (; n < CELL_OSK_MAX_TEXT_LENGTH && s_osk_typed[n]; n++) s_result_text[n] = (CellOskDialogChar)s_osk_typed[n];
++    s_result_text[n] = 0;
++    s_result_length = n;
++    s_osk_result_code = s_osk_ok ? CELL_OSK_DIALOG_INPUT_FIELD_RESULT_OK : CELL_OSK_DIALOG_INPUT_FIELD_RESULT_CANCELED;
++    printf("[cellOskDialog] %s (%u chars) t=%.3f\n", s_osk_ok ? "entered" : "cancelled", n,
++           ps3_qpc_us() / 1e6);
++    InterlockedExchange(&s_osk_state, 2);
++    return 0;
++}
++#endif
++
++/* From cellSysutilCheckCallback, on the guest thread: deliver FINISHED once the
++ * host window has an answer. */
++void cellOskDialog_tick(void)
++{
++#ifdef _WIN32
++    if (InterlockedCompareExchange(&s_osk_state, 3, 2) == 2) osk_broadcast(CELL_SYSUTIL_OSKDIALOG_FINISHED);
++#else
++    if (s_osk_state == 2) { s_osk_state = 3; osk_broadcast(CELL_SYSUTIL_OSKDIALOG_FINISHED); }
++#endif
++}
++
+ /* Convert narrow string to UTF-16LE (simple ASCII subset) */
+ static void osk_ascii_to_utf16(const char* src, CellOskDialogChar* dst,
+                                 u32 maxChars)
+@@ -123,13 +316,22 @@ s32 cellOskDialogLoadAsync(u32 container,
+                            const CellOskDialogParam* dialogParam,
+                            const CellOskDialogInputFieldInfo* inputFieldInfo)
+ {
+-    (void)container; (void)dialogParam;
+-
+-    if (!s_osk_initialized)
+-        return CELL_OSK_ERROR_NOT_INITIALIZED;
+-
+-    if (s_osk_loaded)
+-        return CELL_OSK_ERROR_DIALOG_ALREADY_LOADED;
++    (void)dialogParam;
++    printf("[cellOskDialog] LoadAsync(container=0x%X) t=%.3f\n", (unsigned)container, ps3_qpc_us() / 1e6);
++
++    /* There is no cellOskDialogInit in the PS3 SDK -- it is this HLE's own
++     * test entry point -- so a title never calls it, and requiring it made
++     * LoadAsync fail CELL_OSK_ERROR_NOT_INITIALIZED before its first log
++     * line: Sakatsuku's name entry then waited on a black screen. RPCS3's
++     * LoadAsync checks only the parameters and that no dialog is loaded
++     * (CELL_SYSUTIL_ERROR_BUSY). */
++    s_osk_initialized = 1;
++    if (!GUEST_EA(inputFieldInfo))
++        return CELL_OSK_ERROR_INVALID_PARAMETER;
++    if (s_osk_loaded) {
++        printf("[cellOskDialog] LoadAsync while a dialog is loaded -> BUSY\n");
++        return (s32)0x8002B105;   /* CELL_SYSUTIL_ERROR_BUSY */
++    }
+ 
+     s_osk_loaded = 1;
+ 
+@@ -173,34 +375,81 @@ s32 cellOskDialogLoadAsync(u32 container,
+     } else {
+         s_result_length = 0;
+     }
+-
++    s_osk_result_code = CELL_OSK_DIALOG_INPUT_FIELD_RESULT_OK;
++    osk_broadcast(CELL_SYSUTIL_OSKDIALOG_LOADED);
++
++    const char* auto_text = getenv("PS3_OSK_TEXT");
++    if (auto_text || s_default_response[0] != '\0') {
++        if (auto_text) {
++            osk_ascii_to_utf16(auto_text, s_result_text, CELL_OSK_MAX_TEXT_LENGTH);
++            s_result_length = (u32)strlen(auto_text);
++            if (s_result_length > CELL_OSK_MAX_TEXT_LENGTH) s_result_length = CELL_OSK_MAX_TEXT_LENGTH;
++        }
++        s_osk_state = 2;   /* answered: FINISHED goes out on the next CheckCallback */
++        return CELL_OK;
++    }
++#ifdef _WIN32
++    {
++        u32 limit = info_ea ? vm_read32(info_ea + OSKIF_O_LIMIT_LENGTH) : 0;
++        s_osk_limit = (limit && limit < CELL_OSK_MAX_TEXT_LENGTH) ? limit : CELL_OSK_MAX_TEXT_LENGTH;
++        static CellOskDialogChar tmp[CELL_OSK_MAX_TEXT_LENGTH + 1];
++        u32 n = osk_guest_utf16(message_ea, tmp, CELL_OSK_MAX_TEXT_LENGTH);
++        for (u32 i = 0; i < n; i++) s_osk_prompt[i] = (WCHAR)tmp[i];
++        s_osk_prompt[n] = 0;
++        for (u32 i = 0; i < init_len; i++) s_osk_init[i] = (WCHAR)host_init[i];
++        s_osk_init[init_len] = 0;
++        s_osk_state = 1;
++        HANDLE th = CreateThread(NULL, 0, osk_thread, NULL, 0, NULL);
++        if (th) CloseHandle(th);
++        else s_osk_state = 2;   /* no thread: answer with the initial text */
++    }
++#else
++    s_osk_state = 2;
++#endif
+     return CELL_OK;
+ }
+ 
+-s32 cellOskDialogUnloadAsync(CellOskDialogCallbackReturnParam* result)
++/* RPCS3 getText: write result; copy the text into pResultString up to
++ * numCharsResultString units (the caller's capacity, left as it is) and put a 0
++ * after it, so the buffer needs one element more than the stated length. */
++static void osk_write_result(u32 res_ea, s32 code)
+ {
+-    if (!s_osk_initialized)
+-        return CELL_OSK_ERROR_NOT_INITIALIZED;
++    vm_write32(res_ea + OSKRET_O_RESULT, (u32)code);
++    const s32 cap = (s32)vm_read32(res_ea + OSKRET_O_NUMCHARS);
++    const u32 str_ea = vm_read32(res_ea + OSKRET_O_PRESULTSTRING);
++    if (!str_ea || cap < 0) return;
++    if (code != CELL_OSK_DIALOG_INPUT_FIELD_RESULT_OK &&
++        code != CELL_OSK_DIALOG_INPUT_FIELD_RESULT_NO_INPUT_TEXT) return;
++    u32 n = s_result_length;
++    if (n > CELL_OSK_MAX_TEXT_LENGTH - 1) n = CELL_OSK_MAX_TEXT_LENGTH - 1;
++    if (n > (u32)cap) n = (u32)cap;
++    for (u32 i = 0; i < n; i++) vm_write16(str_ea + i * 2, s_result_text[i]);
++    vm_write16(str_ea + n * 2, 0);
++}
+ 
++s32 cellOskDialogUnloadAsync(CellOskDialogCallbackReturnParam* result)
++{
+     if (!s_osk_loaded)
+         return CELL_OSK_ERROR_DIALOG_NOT_LOADED;
+ 
+-    printf("[cellOskDialog] UnloadAsync()\n");
++    printf("[cellOskDialog] UnloadAsync() t=%.3f\n", ps3_qpc_us() / 1e6);
++#ifdef _WIN32
++    if (s_osk_state == 1 && s_osk_hwnd) {   /* the title gave up waiting */
++        PostMessageW(s_osk_hwnd, WM_CLOSE, 0, 0);
++        for (int i = 0; i < 200 && s_osk_state == 1; i++) Sleep(5);
++    }
++#endif
+ 
+     if (result) {
+-        u32 res_ea = GUEST_EA(result);
+-        vm_write32(res_ea + OSKRET_O_RESULT,
+-                   CELL_OSK_DIALOG_INPUT_FIELD_RESULT_OK);
+-        vm_write32(res_ea + OSKRET_O_NUMCHARS, s_result_length);
+-        u32 str_ea = vm_read32(res_ea + OSKRET_O_PRESULTSTRING);
+-        if (str_ea && s_result_length > 0) {
+-            /* UTF-16, big-endian in guest memory: one unit at a time. */
+-            for (u32 i = 0; i <= s_result_length; i++)
+-                vm_write16(str_ea + i * 2, s_result_text[i]);
+-        }
++        const u32 res_ea = GUEST_EA(result);
++        if ((s32)vm_read32(res_ea + OSKRET_O_NUMCHARS) < 0)
++            return CELL_OSK_ERROR_INVALID_PARAMETER;
++        osk_write_result(res_ea, s_osk_result_code);
+     }
+ 
+     s_osk_loaded = 0;
++    s_osk_state = 0;
++    osk_broadcast(CELL_SYSUTIL_OSKDIALOG_UNLOADED);
+     return CELL_OK;
+ }
+ 
+@@ -222,7 +471,16 @@ s32 cellOskDialogAbort(void)
+     if (!s_osk_loaded)
+         return CELL_OSK_ERROR_DIALOG_NOT_LOADED;
+ 
+-    s_osk_loaded = 0;
++    /* RPCS3: the dialog closes with result ABORT and FINISHED follows; the
++     * title still calls UnloadAsync, so the dialog stays loaded until then. */
++#ifdef _WIN32
++    if (s_osk_state == 1 && s_osk_hwnd) {
++        PostMessageW(s_osk_hwnd, WM_CLOSE, 0, 0);
++        for (int i = 0; i < 200 && s_osk_state == 1; i++) Sleep(5);
++    }
++#endif
++    s_osk_result_code = CELL_OSK_DIALOG_INPUT_FIELD_RESULT_ABORT;
++    s_osk_state = 2;   /* FINISHED on the next CheckCallback */
+     return CELL_OK;
+ }
+ 
+@@ -254,24 +512,13 @@ s32 cellOskDialogSetSeparateWindowOption(u32 option)
+ 
+ s32 cellOskDialogGetInputText(CellOskDialogCallbackReturnParam* result)
+ {
+-    if (!s_osk_initialized)
+-        return CELL_OSK_ERROR_NOT_INITIALIZED;
+-
+     if (!result)
+         return CELL_OSK_ERROR_INVALID_PARAMETER;
+-
+-    u32 res_ea = GUEST_EA(result);
+-    vm_write32(res_ea + OSKRET_O_RESULT, (s_result_length > 0)
+-               ? CELL_OSK_DIALOG_INPUT_FIELD_RESULT_OK
+-               : CELL_OSK_DIALOG_INPUT_FIELD_RESULT_NO_INPUT_TEXT);
+-    vm_write32(res_ea + OSKRET_O_NUMCHARS, s_result_length);
+-
+-    u32 str_ea = vm_read32(res_ea + OSKRET_O_PRESULTSTRING);
+-    if (str_ea && s_result_length > 0) {
+-        /* UTF-16, big-endian in guest memory: one unit at a time. */
+-        for (u32 i = 0; i <= s_result_length; i++)
+-            vm_write16(str_ea + i * 2, s_result_text[i]);
+-    }
+-
++    const u32 res_ea = GUEST_EA(result);
++    if ((s32)vm_read32(res_ea + OSKRET_O_NUMCHARS) < 0)
++        return CELL_OSK_ERROR_INVALID_PARAMETER;
++    osk_write_result(res_ea, (s_result_length > 0)
++                     ? CELL_OSK_DIALOG_INPUT_FIELD_RESULT_OK
++                     : CELL_OSK_DIALOG_INPUT_FIELD_RESULT_NO_INPUT_TEXT);
+     return CELL_OK;
+ }
+diff --git a/libs/system/cellSysutil.c b/libs/system/cellSysutil.c
+index c4eb87d..ecd369a 100644
+--- a/libs/system/cellSysutil.c
++++ b/libs/system/cellSysutil.c
+@@ -219,6 +219,9 @@ s32 cellSysutilCheckCallback(void)
+      * its dismissal. Done before the drain so the callback it queues is
+      * delivered on this same poll. */
+     { extern void cellMsgDialog_tick(void); cellMsgDialog_tick(); }
++    /* An answered text input (cellOskDialog.c host window) queues its
++     * OSKDIALOG_FINISHED here, on the guest thread, for this same poll. */
++    { extern void cellOskDialog_tick(void); cellOskDialog_tick(); }
+     /* Turn psnr replies and pushes into queued NP callbacks first, so this
+      * same poll delivers them. A no-op when no psnr server is configured. */
+     { extern void np_psnr_pump(void); np_psnr_pump(); }

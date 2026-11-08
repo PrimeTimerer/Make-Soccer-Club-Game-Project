@@ -1,0 +1,367 @@
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -2169,8 +2169,24 @@
+      * (gcm_legacy_method_has_effect). RSX_TRACE still sees every method. */
+     static int s_rsx_trace = -1;
+     if (s_rsx_trace < 0) s_rsx_trace = getenv("RSX_TRACE") ? 1 : 0;
+-    const int legacy_state_live = rsx_get_backend() != NULL || !rsx_draw_engine_enabled() ||
+-                                  s_rsx_trace;
++    int legacy_state_live = rsx_get_backend() != NULL || !rsx_draw_engine_enabled() ||
++                            s_rsx_trace;
++    /* Live draw keeps its own register file (rsx_live_draw_method); the
++     * vtable backend registered next to it is the null backend, whose
++     * callbacks only log. Feeding the legacy rsx_state every word was ~4% of
++     * this thread at 60 ticks. As with the draw engine, only the methods with
++     * effects outside it (labels, semaphores, references) go through.
++     * GCM_LIVE_LEGACY_STATE=1 keeps feeding it everything.
++     * live_only: live draw with no per-word diagnostic env set and no draw
++     * engine, for the contiguous-run fast path below. */
++    static int s_live_only = -1, s_keep_legacy = -1;
++    if (s_keep_legacy < 0) { const char* e = getenv("GCM_LIVE_LEGACY_STATE"); s_keep_legacy = (e && *e == '1') ? 1 : 0; }
++    if (s_live_only < 0)
++        s_live_only = (rsx_live_draw_enabled() && !rsx_draw_engine_enabled() &&
++                       !(getenv("GCM_SUBCH7") || getenv("GCM_OBJDBG") || getenv("GCM_SUBCH_GATE") ||
++                         getenv("GCM_WORD_STATS") || getenv("GCM_VAL_WATCH") || getenv("GCM_METHOD_HIST") ||
++                         getenv("RSX_LIVE_FEED_DBG"))) ? 1 : 0;
++    if (s_live_only && !s_keep_legacy) legacy_state_live = s_rsx_trace;
+ 
+ 
+     /* Walk the FIFO exactly like the RSX: chase the guest-written `put` (an IO
+@@ -2648,6 +2664,26 @@
+                     s_fifo_getoff += 4 + count * 4;
+                     continue;
+                 }
++            }
++            /* The same run with live draw on and no word diagnostic set: what
++             * the per-word loop below does for a 3D subchannel -- the live
++             * engine, then gcm_3d_method -- with the IO offset translated once
++             * instead of per word and none of the per-word diagnostic checks.
++             * Most of a match frame's words come this way. */
++            if (s_live_only && count && (subch == 0 || (subch == 1 && !s1_2d)) &&
++                ((s_fifo_getoff + 4) >> 20) == ((s_fifo_getoff + count * 4) >> 20)) {
++                const u32 dea = gcm_io2ea(s_fifo_getoff + 4);
++                if (dea) {
++                    const u32 sm = subch << 13;
++                    for (u32 i = 0; i < count; i++) {
++                        const u32 m = type == 0 ? method + i * 4 : method;
++                        const u32 v = vm_read32(dea + i * 4);
++                        rsx_live_draw_method(sm | m, v);
++                        gcm_3d_method(&s_state, m, v, legacy_state_live);
++                    }
++                    s_fifo_getoff += 4 + count * 4;
++                    continue;
++                }
+             }
+             for (u32 i = 0; i < count; i++) {
+                 u32 dea = gcm_io2ea(s_fifo_getoff + 4 + i * 4);
+--- a/libs/video/rsx_vertex_compact.c
++++ b/libs/video/rsx_vertex_compact.c
+@@ -339,6 +339,107 @@
+         for (u32 c = 0; c < n; c++) { decode; }                                 \
+     }
+ 
++#if defined(_M_X64) || defined(__x86_64__)
++/* ---- SSE2 decoders (LD_FETCH_SCALAR=1 = the scalar loops) ----------------
++ * One 16-byte result per vertex instead of a pre-set plus a per-component
++ * loop. Bit-identical to the scalar decode: FLOAT is a byte swap; HALF is the
++ * same integer rebuild as rsx_compact_be_f16 (half denormals flush to signed
++ * zero, which is why this is not F16C); the integer types convert with the
++ * same int->float conversion and DIVIDE (not multiply by a reciprocal) by the
++ * same constant; CMP32 unpacks exactly as the scalar case does. Loads read
++ * only the n components' bytes, never past the element. Lanes >= n keep the
++ * (0,0,0,1) default. */
++#include <emmintrin.h>
++static inline __m128i rsx_v_bswap32(__m128i v) {
++    v = _mm_shufflelo_epi16(v, 0xB1); v = _mm_shufflehi_epi16(v, 0xB1);
++    return _mm_or_si128(_mm_slli_epi16(v, 8), _mm_srli_epi16(v, 8));
++}
++static inline __m128i rsx_v_bswap16(__m128i v) {
++    return _mm_or_si128(_mm_slli_epi16(v, 8), _mm_srli_epi16(v, 8));
++}
++static inline u32 rsx_v_rd32(const u8* p) { u32 w; memcpy(&w, p, 4); return w; }
++static inline u16 rsx_v_rd16(const u8* p) { u16 w; memcpy(&w, p, 2); return w; }
++/* The raw bytes of n components of `bytes` each, in the low lanes of a register. */
++static inline __m128i rsx_v_load(const u8* src, u32 total) {
++    switch (total) {
++    case 16: return _mm_loadu_si128((const __m128i*)src);
++    case 12: return _mm_unpacklo_epi64(_mm_loadl_epi64((const __m128i*)src),
++                                       _mm_cvtsi32_si128((int)rsx_v_rd32(src + 8)));
++    case 8:  return _mm_loadl_epi64((const __m128i*)src);
++    case 6:  return _mm_insert_epi16(_mm_cvtsi32_si128((int)rsx_v_rd32(src)), rsx_v_rd16(src + 4), 2);
++    case 4:  return _mm_cvtsi32_si128((int)rsx_v_rd32(src));
++    case 3:  return _mm_cvtsi32_si128((int)((u32)src[0] | (u32)src[1] << 8 | (u32)src[2] << 16));
++    case 2:  return _mm_cvtsi32_si128((int)rsx_v_rd16(src));
++    case 1:  return _mm_cvtsi32_si128((int)src[0]);
++    default: return _mm_setzero_si128();
++    }
++}
++static inline __m128 rsx_v_defaults(__m128 v, u32 n) {
++    static const u32 keep[5][4] = { {0,0,0,0}, {~0u,0,0,0}, {~0u,~0u,0,0}, {~0u,~0u,~0u,0}, {~0u,~0u,~0u,~0u} };
++    const __m128 m = _mm_loadu_ps((const float*)keep[n]);
++    return _mm_or_ps(_mm_and_ps(m, v), _mm_andnot_ps(m, _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f)));
++}
++static inline __m128 rsx_v_float(const u8* src, u32 n) {
++    return rsx_v_defaults(_mm_castsi128_ps(rsx_v_bswap32(rsx_v_load(src, n * 4))), n);
++}
++static inline __m128 rsx_v_half(const u8* src, u32 n) {
++    const __m128i h = _mm_unpacklo_epi16(rsx_v_bswap16(rsx_v_load(src, n * 2)), _mm_setzero_si128());
++    const __m128i sign = _mm_slli_epi32(_mm_srli_epi32(h, 15), 31);
++    const __m128i exp = _mm_and_si128(_mm_srli_epi32(h, 10), _mm_set1_epi32(0x1F));
++    const __m128i man = _mm_slli_epi32(_mm_and_si128(h, _mm_set1_epi32(0x3FF)), 13);
++    const __m128i normal = _mm_or_si128(sign, _mm_or_si128(_mm_slli_epi32(_mm_add_epi32(exp, _mm_set1_epi32(112)), 23), man));
++    const __m128i infnan = _mm_or_si128(sign, _mm_or_si128(_mm_set1_epi32(0x7F800000), man));
++    const __m128i e0 = _mm_cmpeq_epi32(exp, _mm_setzero_si128());
++    const __m128i e31 = _mm_cmpeq_epi32(exp, _mm_set1_epi32(31));
++    __m128i r = _mm_or_si128(_mm_and_si128(e31, infnan), _mm_andnot_si128(e31, normal));
++    r = _mm_or_si128(_mm_and_si128(e0, sign), _mm_andnot_si128(e0, r));
++    return rsx_v_defaults(_mm_castsi128_ps(r), n);
++}
++static inline __m128 rsx_v_u8(const u8* src, u32 n, int norm) {
++    const __m128i z = _mm_setzero_si128();
++    const __m128i b = _mm_unpacklo_epi16(_mm_unpacklo_epi8(rsx_v_load(src, n), z), z);
++    __m128 f = _mm_cvtepi32_ps(b);
++    if (norm) f = _mm_div_ps(f, _mm_set1_ps(255.0f));
++    return rsx_v_defaults(f, n);
++}
++static inline __m128 rsx_v_s16(const u8* src, u32 n, int norm) {
++    const __m128i w = rsx_v_bswap16(rsx_v_load(src, n * 2));
++    const __m128i s = _mm_srai_epi32(_mm_unpacklo_epi16(w, w), 16);   /* sign-extend */
++    __m128 f = _mm_cvtepi32_ps(s);
++    if (norm) f = _mm_div_ps(f, _mm_set1_ps(32767.0f));
++    return rsx_v_defaults(f, n);
++}
++static inline __m128 rsx_v_cmp32(const u8* src) {
++    const u32 word = ((u32)src[0] << 24) | ((u32)src[1] << 16) | ((u32)src[2] << 8) | (u32)src[3];
++    s32 x = (s32)(word & 0x7FF), y = (s32)((word >> 11) & 0x7FF), z = (s32)((word >> 22) & 0x3FF);
++    if (x & 0x400) x -= 0x800;
++    if (y & 0x400) y -= 0x800;
++    if (z & 0x200) z -= 0x400;
++    /* (x/1023, y/1023, z/511, 1/1 = 1.0) */
++    return _mm_div_ps(_mm_cvtepi32_ps(_mm_set_epi32(1, z, y, x)), _mm_set_ps(1.0f, 511.0f, 1023.0f, 1023.0f));
++}
++#define RSX_FETCH_LOOP_V(decodev)                                               \
++    for (u32 i = 0; i < count; i++) {                                           \
++        float* v = (float*)(out + (size_t)i * stride + slot * 16u);             \
++        const u32 element = plain                                               \
++            ? ((refs[i].vertex_id + refs[i].base_index) & 0x000FFFFFu)          \
++            : rsx_vertex_element_index(refs[i].vertex_id, refs[i].base_index,   \
++                                       fetch->desc.frequency, modulo);          \
++        if (element - first > span) {                                          \
++            if (!rsx_vertex_fetch_attr_value(plan, attr, &refs[i], v)) return 0;      \
++            continue;                                                           \
++        }                                                                       \
++        const u8* src = base + (u64)(element - first) * fstride;                \
++        _mm_storeu_ps(v, (decodev));                                            \
++    }
++static int rsx_fetch_simd_on(void)
++{
++    static int on = -1;
++    if (on < 0) { const char* e = getenv("LD_FETCH_SCALAR"); on = !(e && *e == '1'); }
++    return on;
++}
++#endif
++
+ int rsx_vertex_fetch_many(
+     const rsx_vertex_fetch_plan* plan, const rsx_vertex_ref* refs, u32 count,
+     u8* out)
+@@ -365,6 +466,20 @@
+         const u32 modulo = (plan->divider_mask >> attr) & 1u;
+         const int plain = rsx_vertex_freq_plain(fetch->desc.frequency, modulo);
+         const u32 n = fetch->desc.size < 4 ? fetch->desc.size : 4;
++#if defined(_M_X64) || defined(__x86_64__)
++        if (rsx_fetch_simd_on()) {
++            switch (type) {
++            case RSX_VTX_TYPE_FLOAT:   RSX_FETCH_LOOP_V(rsx_v_float(src, n)) continue;
++            case RSX_VTX_TYPE_HALF:    RSX_FETCH_LOOP_V(rsx_v_half(src, n)) continue;
++            case RSX_VTX_TYPE_UNORM8:  RSX_FETCH_LOOP_V(rsx_v_u8(src, n, 1)) continue;
++            case RSX_VTX_TYPE_UINT8:   RSX_FETCH_LOOP_V(rsx_v_u8(src, n, 0)) continue;
++            case RSX_VTX_TYPE_SNORM16: RSX_FETCH_LOOP_V(rsx_v_s16(src, n, 1)) continue;
++            case RSX_VTX_TYPE_SINT16:  RSX_FETCH_LOOP_V(rsx_v_s16(src, n, 0)) continue;
++            case RSX_VTX_TYPE_CMP32:   RSX_FETCH_LOOP_V(rsx_v_cmp32(src)) continue;
++            default: break;
++            }
++        }
++#endif
+         switch (type) {
+         case RSX_VTX_TYPE_FLOAT:
+             RSX_FETCH_LOOP(v[c] = rsx_compact_be_f32(src + c * 4))
+--- a/libs/video/rsx_live_draw.c
++++ b/libs/video/rsx_live_draw.c
+@@ -428,6 +428,34 @@
+ static u32 g_fctx_cur;
+ static int g_ld_pipeline;                        /* 1 once context 1 exists */
+ 
++/* Redundant-state elimination for the draw path (opt-in, LD_STATE_CACHE=1;
++ * see ld_ls_on). A match frame has 3,000-5,000 draws and each
++ * set render targets, descriptor heaps, PSO, root signature, viewport,
++ * scissor, stencil ref and topology again -- ~15 D3D12 calls a draw, most
++ * repeating the previous draw's values. sink_end_impl skips a call whose
++ * values are the ones it set last. Every command-list Reset and every other
++ * function that sets list state (ld_downsample, ld_scaled_blit,
++ * zdepth_snapshot) invalidates the cache. Root CBVs, descriptor tables and
++ * vertex/index buffers change every draw and are always set. */
++static struct {
++    int valid;
++    u32 n_rtv; D3D12_CPU_DESCRIPTOR_HANDLE rtv[4]; int have_dsv; D3D12_CPU_DESCRIPTOR_HANDLE dsv;
++    ID3D12DescriptorHeap* heaps[2];
++    ID3D12PipelineState* pso;
++    ID3D12RootSignature* rs;
++    D3D12_VIEWPORT vp; D3D12_RECT sc; UINT sref; int topo;
++} g_ls;
++static void ld_ls_invalidate(void) { g_ls.valid = 0; }
++static int ld_ls_on(void)
++{
++    /* Opt-in (LD_STATE_CACHE=1): measured no gain in the driver's share of
++     * the frame-clock thread (6.1% either way) and one unexplained black frame
++     * at the match intro in its only screenshot run, so it stays off. */
++    static int on = -1;
++    if (on < 0) { const char* e = getenv("LD_STATE_CACHE"); on = (e && *e == '1') ? 1 : 0; }
++    return on;
++}
++
+ static void ld_fctx_save(u32 i)
+ {
+     ld_frame_ctx* c = &g_fctx[i];
+@@ -1865,6 +1893,7 @@
+         ld_fctx_load(g_fctx_cur);
+         g.alloc->lpVtbl->Reset(g.alloc);
+         g.list->lpVtbl->Reset(g.list, g.alloc, NULL);
++        ld_ls_invalidate();
+         /* New context: every ring cursor (and the sampler-table memo, which
+          * indexes the old context's heap) starts over. */
+         g.upload_used = 0;
+@@ -1921,6 +1950,7 @@
+     }
+     g.alloc->lpVtbl->Reset(g.alloc);
+     g.list->lpVtbl->Reset(g.list, g.alloc, NULL);
++    ld_ls_invalidate();
+     g.upload_used = 0;
+ #if defined(YZ_PERF_PROFILE)
+     const u64 flush_ticks = (u64)(ld_profile_qpc() - flush_begin);
+@@ -3251,6 +3281,7 @@
+     /* RTVs for surfaces live above the swap-chain backbuffer RTVs */
+     g.dev->lpVtbl->CreateRenderTargetView(g.dev, s->tex,
+         NULL, rtv_handle(LD_SWAP_BUFFERS + slot));
++    ld_ls_invalidate();   /* same RTV handle, new resource: the draw path must re-bind */
+     srv_write(SRV_SURFACE_BASE + slot, s->tex);
+     if (slot == g.n_surfaces) g.n_surfaces++;
+     return slot;
+@@ -3505,6 +3536,7 @@
+ static int ld_downsample(u32 si, u32 sx, u32 sy, u32 k,
+                          u32 di, u32 dx, u32 dy, u32 w, u32 h)
+ {
++    ld_ls_invalidate();   /* sets list state the draw path caches */
+     const DXGI_FORMAT fmt = g.surfaces[di].fmt;
+     ID3D12PipelineState* pso = NULL;
+     u32 n = 0;
+@@ -3719,6 +3751,7 @@
+ static int ld_scaled_blit(u32 si, float sx, float sy, float sw, float sh,
+                           u32 di, u32 dx, u32 dy, u32 dw, u32 dh)
+ {
++    ld_ls_invalidate();   /* sets list state the draw path caches */
+     surface_t* s = &g.surfaces[si];
+     surface_t* d = &g.surfaces[di];
+     if (!s->tex || !d->tex || !s->w || !s->h || !dw || !dh) return 0;
+@@ -4120,6 +4153,7 @@
+     dsvd.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+     g.dev->lpVtbl->CreateDepthStencilView(
+         g.dev, z->tex, &dsvd, dsv_handle(1 + slot));
++    ld_ls_invalidate();   /* same DSV handle, new resource: the draw path must re-bind */
+ 
+     /* D3D12 forbids a partial CopyTextureRegion from a depth/stencil
+      * resource.  Keep the replay-proven logical dimensions and resolve the
+@@ -4194,6 +4228,7 @@
+  * VRAM. */
+ static int zdepth_snapshot(u32 slot)
+ {
++    ld_ls_invalidate();   /* sets list state (compute PSO, heaps) the draw path caches */
+     if (!slot) return 0;
+     zdepth_t* z = &g.zdepths[slot - 1];
+     if (!z->snapshot || !g.depth_snapshot_rootsig ||
+@@ -8349,16 +8384,28 @@
+             g_ld_stats.implicit_depth_clears++;
+         }
+     }
++    const int ls_ok = ld_ls_on() && g_ls.valid;   /* see g_ls */
+     {
+         D3D12_CPU_DESCRIPTOR_HANDLE rtvs[4];
+         rtvs[0] = rtv;
+         for (u32 r = 1; r < n_mrt; r++)
+             rtvs[r] = rtv_handle(LD_SWAP_BUFFERS + mrt[r]);
+-        g.list->lpVtbl->OMSetRenderTargets(g.list, n_mrt, rtvs, FALSE,
+-                                           have_dsv ? &dsv : NULL);
++        int same = ls_ok && g_ls.n_rtv == n_mrt && g_ls.have_dsv == (have_dsv != 0) &&
++                   (!have_dsv || g_ls.dsv.ptr == dsv.ptr);
++        for (u32 r = 0; same && r < n_mrt; r++) same = g_ls.rtv[r].ptr == rtvs[r].ptr;
++        if (!same) {
++            g.list->lpVtbl->OMSetRenderTargets(g.list, n_mrt, rtvs, FALSE,
++                                               have_dsv ? &dsv : NULL);
++            g_ls.n_rtv = n_mrt; g_ls.have_dsv = have_dsv != 0;
++            if (have_dsv) g_ls.dsv = dsv;
++            for (u32 r = 0; r < n_mrt && r < 4; r++) g_ls.rtv[r] = rtvs[r];
++        }
+     }
+     ID3D12DescriptorHeap* heaps[] = {g.srv_heap, g.smp_heap};
+-    g.list->lpVtbl->SetDescriptorHeaps(g.list, 2, heaps);
++    if (!ls_ok || g_ls.heaps[0] != heaps[0] || g_ls.heaps[1] != heaps[1]) {
++        g.list->lpVtbl->SetDescriptorHeaps(g.list, 2, heaps);
++        g_ls.heaps[0] = heaps[0]; g_ls.heaps[1] = heaps[1];
++    }
+     const D3D12_GPU_DESCRIPTOR_HANDLE table = srv_table(slots);
+     const D3D12_GPU_DESCRIPTOR_HANDLE stbl = sampler_table(smp_slots);
+     D3D12_GPU_DESCRIPTOR_HANDLE vtex_table = {0};
+@@ -8402,8 +8449,14 @@
+                  (size_t)(g_ld_draw_const_hi - g_ld_draw_const_lo + 1u) * 16u); }
+     memcpy(cbdst + 512 * 16, xf, sizeof(xf));
+ 
+-    g.list->lpVtbl->SetPipelineState(g.list, pso);
+-    g.list->lpVtbl->SetGraphicsRootSignature(g.list, g.rootsig_x);
++    if (!ls_ok || g_ls.pso != pso) {
++        g.list->lpVtbl->SetPipelineState(g.list, pso);
++        g_ls.pso = pso;
++    }
++    if (!ls_ok || g_ls.rs != g.rootsig_x) {
++        g.list->lpVtbl->SetGraphicsRootSignature(g.list, g.rootsig_x);
++        g_ls.rs = g.rootsig_x;
++    }
+     g.list->lpVtbl->SetGraphicsRootConstantBufferView(
+         g.list, 0, g.cb->lpVtbl->GetGPUVirtualAddress(g.cb) + g.cb_used);
+     if (ld_fp_constants_buffered())
+@@ -8449,11 +8502,20 @@
+             if (sc.bottom < sc.top)      sc.bottom = sc.top;
+         }
+     }
+-    g.list->lpVtbl->RSSetViewports(g.list, 1, &dvp);
+-    g.list->lpVtbl->RSSetScissorRects(g.list, 1, &sc);
++    if (!ls_ok || memcmp(&g_ls.vp, &dvp, sizeof dvp) != 0) {
++        g.list->lpVtbl->RSSetViewports(g.list, 1, &dvp);
++        g_ls.vp = dvp;
++    }
++    if (!ls_ok || memcmp(&g_ls.sc, &sc, sizeof sc) != 0) {
++        g.list->lpVtbl->RSSetScissorRects(g.list, 1, &sc);
++        g_ls.sc = sc;
++    }
+     /* Dynamic stencil reference (kept out of the PSO key on purpose). */
+-    g.list->lpVtbl->OMSetStencilRef(
+-        g.list, rsx_dsp_reg(&g.rsx, M_STENCIL_FUNC_REF) & 0xFFu);
++    { const UINT sref = rsx_dsp_reg(&g.rsx, M_STENCIL_FUNC_REF) & 0xFFu;
++      if (!ls_ok || g_ls.sref != sref) {
++          g.list->lpVtbl->OMSetStencilRef(g.list, sref);
++          g_ls.sref = sref;
++      } }
+ 
+     D3D12_VERTEX_BUFFER_VIEW vbv;
+     vbv.BufferLocation = g.vb->lpVtbl->GetGPUVirtualAddress(g.vb) + g.vb_used;
+@@ -8461,7 +8523,11 @@
+     vbv.SizeInBytes = (u32)draw_vb_bytes;
+     if (vertex_stride)
+         g.list->lpVtbl->IASetVertexBuffers(g.list, 0, 1, &vbv);
+-    g.list->lpVtbl->IASetPrimitiveTopology(g.list, D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
++    if (!ls_ok || !g_ls.topo) {
++        g.list->lpVtbl->IASetPrimitiveTopology(g.list, D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
++        g_ls.topo = 1;
++    }
++    g_ls.valid = ld_ls_on();   /* every cached field now holds what the list has */
+     {
+         const u64 serial = ++g_ld_recent_draw_total;
+         ld_recent_draw* draw =

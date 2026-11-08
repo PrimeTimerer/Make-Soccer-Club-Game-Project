@@ -1,0 +1,160 @@
+--- a/recompiled/ppu_recomp_005.cpp
++++ b/recompiled/ppu_recomp_005.cpp
+@@ -65323,7 +65323,20 @@
+         return;
+ }
+ 
++extern "C" int saka_logic60_match_skip(void);
++extern "C" void saka_logic60_sim_begin(void);
++extern "C" void saka_logic60_sim_end(void);
++static void func_001F65AC_sim(ppu_context* ctx);
++/* Sakatsuku SAKA_LOGIC60: the match simulation stays at 30 Hz -- skip every
++ * odd tick, reporting "still running", and run the others with the engine
++ * timer showing its original 30 Hz values (saka_hooks.c). */
+ void func_001F65AC(ppu_context* ctx) {
++    if (saka_logic60_match_skip()) { ctx->gpr[3] = 1; return; }
++    saka_logic60_sim_begin();
++    func_001F65AC_sim(ctx);
++    saka_logic60_sim_end();
++}
++static void func_001F65AC_sim(ppu_context* ctx) {
+     PPU_MM_SNAP
+         uint64_t _cs_31 = ctx->gpr[31];
+         vm_write64(ctx->gpr[1] + -0x80, ctx->gpr[1]); ctx->gpr[1] += -0x80;
+--- a/recompiled/ppu_recomp_018.cpp
++++ b/recompiled/ppu_recomp_018.cpp
+@@ -22834,6 +22834,7 @@
+ }
+ 
+ extern "C" int saka_logic60(void);
++extern "C" void saka_logic60_tick(void);
+ void func_00634CF0(ppu_context* ctx) {
+     PPU_MM_SNAP
+         uint64_t _cs_24 = ctx->gpr[24];
+@@ -22866,7 +22867,7 @@
+         vm_write64(ctx->gpr[1] + 0x90, ctx->gpr[26]);
+         vm_write64(ctx->gpr[1] + 0x88, ctx->gpr[25]);
+         vm_write64(ctx->gpr[1] + 0x80, ctx->gpr[24]);
+-        if (saka_logic60()) ctx->gpr[3] = 1;   /* Sakatsuku SAKA_LOGIC60: one vblank per tick (dt 1/60, factor 0.5) */
++        if (saka_logic60()) { ctx->gpr[3] = 1; saka_logic60_tick(); }   /* Sakatsuku SAKA_LOGIC60: one vblank per tick (dt 1/60, factor 0.5); count ticks for the 30 Hz match */
+         vm_write32(ctx->gpr[28] + 0xC0, ctx->gpr[3]);
+         ctx->lr = 0x00634D50; func_001946B0(ctx); DRAIN_TRAMPOLINE(ctx);
+         ctx->gpr[4] = vm_read64(ctx->gpr[28] + 0x158);
+--- a/recompiled/ppu_recomp_029.cpp
++++ b/recompiled/ppu_recomp_029.cpp
+@@ -73920,6 +73920,7 @@
+ }
+ 
+ extern "C" int saka_logic60(void);
++extern "C" void saka_logic60_tick(void);
+ void func_00634CF8(ppu_context* ctx) {
+     PPU_MM_SNAP
+         uint64_t _cs_24 = ctx->gpr[24];
+@@ -73950,7 +73951,7 @@
+         vm_write64(ctx->gpr[1] + 0x90, ctx->gpr[26]);
+         vm_write64(ctx->gpr[1] + 0x88, ctx->gpr[25]);
+         vm_write64(ctx->gpr[1] + 0x80, ctx->gpr[24]);
+-        if (saka_logic60()) ctx->gpr[3] = 1;   /* Sakatsuku SAKA_LOGIC60: one vblank per tick (dt 1/60, factor 0.5) */
++        if (saka_logic60()) { ctx->gpr[3] = 1; saka_logic60_tick(); }   /* Sakatsuku SAKA_LOGIC60: one vblank per tick (dt 1/60, factor 0.5); count ticks for the 30 Hz match */
+         vm_write32(ctx->gpr[28] + 0xC0, ctx->gpr[3]);
+         ctx->lr = 0x00634D50; func_001946B0(ctx); DRAIN_TRAMPOLINE(ctx);
+         ctx->gpr[4] = vm_read64(ctx->gpr[28] + 0x158);
+--- a/saka_hooks.c
++++ b/saka_hooks.c
+@@ -9,6 +9,7 @@
+ #include <stdlib.h>
+ #include <stdio.h>
+ #include <stddef.h>
++#include <string.h>
+ #ifdef _WIN32
+ #  ifndef WIN32_LEAN_AND_MEAN
+ #    define WIN32_LEAN_AND_MEAN
+@@ -143,6 +144,88 @@
+     return on;
+ }
+ 
++/* Under SAKA_LOGIC60 the match simulation still runs at 30 Hz (owner: "30Hz
++ * 유지(결과 동일)" -- identical match results). The engine's task manager
++ * (func_00634CF8, ppu_recomp_018/029) counts its ticks here; the match tick
++ * func_001F65AC (ppu_recomp_005), called by the match scene task
++ * func_0065DF60, skips every odd one and reports "still running". Engine-timed
++ * systems (dt, animation playback) keep running every tick at dt 1/60.
++ * SAKA_LOGIC60_MATCH30=0 steps the match every tick (2x speed, for A/B).
++ * patches/recompiled-0004-logic60-match30.patch. */
++static volatile unsigned s_logic60_tick;
++void saka_logic60_tick(void) { s_logic60_tick++; }
++int saka_logic60_match_skip(void)
++{
++    static int on = -1;
++    if (on < 0) { const char* e = getenv("SAKA_LOGIC60_MATCH30");
++                  on = saka_logic60() && !(e && *e == '0');
++                  if (saka_logic60())
++                      fprintf(stderr, "[saka] match simulation: %s\n",
++                              on ? "30 Hz, every other tick (SAKA_LOGIC60_MATCH30=0 = every tick)" : "every tick"); }
++    return on && (s_logic60_tick & 1u);
++}
++
++/* The 30 Hz match tick sees the engine timer as the original game did: the
++ * task manager set it up for a 60 Hz tick (interval 1, dt 1/60, speed factors
++ * x0.5); for the duration of the match tick it shows interval 2, the factors
++ * at x1.0 (this[0x160+4i] = this[0x178+4i], squared at 0x16C) and the
++ * measured times doubled, then everything is put back. Timer object at
++ * [0x00E93E70], layout from func_00634CF8. Guest words are big-endian. */
++static uint32_t ld_be32(uint32_t ea) { const uint8_t* p = vm_base + ea; return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3]; }
++static void st_be32(uint32_t ea, uint32_t v) { uint8_t* p = vm_base + ea; p[0] = (uint8_t)(v >> 24); p[1] = (uint8_t)(v >> 16); p[2] = (uint8_t)(v >> 8); p[3] = (uint8_t)v; }
++static float ld_bef(uint32_t ea) { const uint32_t w = ld_be32(ea); float f; memcpy(&f, &w, 4); return f; }
++static void st_bef(uint32_t ea, float f) { uint32_t w; memcpy(&w, &f, 4); st_be32(ea, w); }
++static uint32_t s_sim_timer, s_sim_save[9];
++static volatile unsigned s_sim_ticks;   /* match ticks run so far (SAKA_SIMTICK_SHOT) */
++void saka_logic60_sim_begin(void)
++{
++    s_sim_timer = 0;
++    if (!saka_logic60()) return;
++    const uint32_t t = ld_be32(0x00E93E70u);
++    if (!t || ld_be32(t + 0xC0) != 1u) return;
++    s_sim_timer = t;
++    s_sim_save[0] = ld_be32(t + 0xC0);
++    s_sim_save[1] = ld_be32(t + 0x150);
++    s_sim_save[2] = ld_be32(t + 0x154);
++    for (int i = 0; i < 3; i++) { s_sim_save[3 + i] = ld_be32(t + 0x160 + 4 * i); s_sim_save[6 + i] = ld_be32(t + 0x16C + 4 * i); }
++    st_be32(t + 0xC0, 2u);
++    st_bef(t + 0x150, ld_bef(t + 0x150) * 2.0f);
++    st_bef(t + 0x154, ld_bef(t + 0x154) * 2.0f);
++    for (int i = 0; i < 3; i++) {
++        const float b = ld_bef(t + 0x178 + 4 * i);   /* x factor[2] = 1.0 */
++        st_bef(t + 0x160 + 4 * i, b);
++        st_bef(t + 0x16C + 4 * i, b * b);
++    }
++}
++void saka_logic60_sim_end(void)
++{
++    s_sim_ticks++;
++    /* SAKA_SIMTICK_SHOT=<n>[,<n>...] with LD_SURF_DUMP_GATE=<file>: open the
++     * surface-dump gate at those match ticks (3 dumps, one per other tick), so
++     * a 30-tick and a 60-tick run can be compared at the SAME simulation tick. */
++    { static int parsed = 0, n_at = 0; static unsigned at[16]; static const char* gate;
++      static unsigned open_at = 0;
++      if (!parsed) { parsed = 1; gate = getenv("LD_SURF_DUMP_GATE");
++          const char* e = getenv("SAKA_SIMTICK_SHOT");
++          for (const char* q = e; q && *q && n_at < 16; ) { char* endp; unsigned long x = strtoul(q, &endp, 10);
++              if (endp == q) break; at[n_at++] = (unsigned)x; q = (*endp == ',') ? endp + 1 : endp; } }
++      if (gate && n_at) {
++          for (int k = 0; k < n_at; k++) if (s_sim_ticks == at[k]) open_at = s_sim_ticks;
++          if (open_at && s_sim_ticks - open_at <= 4u) {
++              if (((s_sim_ticks - open_at) & 1u) == 0) { FILE* f = fopen(gate, "w"); if (f) { fprintf(f, "%u\n", s_sim_ticks); fclose(f); }
++                  fprintf(stderr, "[simtick] shot at match tick %u\n", s_sim_ticks); }
++              else remove(gate);
++          } else if (open_at && s_sim_ticks - open_at == 5u) { remove(gate); open_at = 0; }
++      } }
++    const uint32_t t = s_sim_timer;
++    if (!t) return;
++    st_be32(t + 0xC0, s_sim_save[0]);
++    st_be32(t + 0x150, s_sim_save[1]);
++    st_be32(t + 0x154, s_sim_save[2]);
++    for (int i = 0; i < 3; i++) { st_be32(t + 0x160 + 4 * i, s_sim_save[3 + i]); st_be32(t + 0x16C + 4 * i, s_sim_save[6 + i]); }
++    s_sim_timer = 0;
++}
++
+ /* ---- CRI ADX2 SPURS jobs: run their lifted code ---------------------------
+  * CRI's sound jobs (AtomDecoder, AsrVoice, DspPack1/2, DspPitchShifter,
+  * HcaMixer; "JOBCRT Ver14") are streamed by the libspurs_jq policy into the

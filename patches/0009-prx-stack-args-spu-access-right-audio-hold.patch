@@ -1,0 +1,214 @@
+diff --git a/libs/audio/cellAudio.c b/libs/audio/cellAudio.c
+index 02b751b..e4e9880 100644
+--- a/libs/audio/cellAudio.c
++++ b/libs/audio/cellAudio.c
+@@ -54,6 +54,8 @@ extern uint32_t sys_event_queue_create_direct(uint64_t key, int32_t size);
+   #include <windows.h>
+   #include <mmdeviceapi.h>
+   #include <audioclient.h>
++  #include <propidl.h>      /* PROPVARIANT: the endpoint's friendly name */
++  #include <wctype.h>
+   #include <process.h>
+ 
+   /* Define WASAPI COM GUIDs (avoids needing uuid.lib linkage for these) */
+@@ -128,8 +130,16 @@ typedef struct {
+     /* For address reporting to guest */
+     u64                  port_addr;      /* guest-visible buffer address */
+     u64                  read_idx_addr;  /* guest-visible read index address */
++    u32                  hold_count;     /* consecutive periods held for a late producer */
+ } AudioPortSlot;
+ 
++/* Optional per-title producer check (see audio_mix_one_block): nonzero when the
++ * title has not yet written block `next_block` of `port`. Set by the port. */
++typedef int (*cellAudio_starve_fn)(u32 port, u32 next_block);
++static cellAudio_starve_fn s_starve_fn;
++static unsigned long long g_audio_holds;     /* periods held for a late producer */
++void cellAudio_set_starve_check(cellAudio_starve_fn fn) { s_starve_fn = fn; }
++
+ static int            s_audio_initialized = 0;
+ static AudioPortSlot  s_ports[CELL_AUDIO_PORT_MAX];
+ 
+@@ -236,6 +246,45 @@ static IAudioRenderClient*  s_wasapi_render = NULL;
+ static HANDLE               s_wasapi_event  = NULL;
+ static UINT32               s_wasapi_buf_frames = 0;
+ 
++/* Endpoint choice. Windows makes a newly connected DualSense/DualShock the
++ * default playback device, so the default endpoint sent the game's sound to
++ * the pad's speaker. PS3_AUDIO_DEVICE=<part of the device name> picks a device
++ * by name (case-insensitive); otherwise game-controller endpoints are skipped
++ * in favour of the first other active one. */
++static const PROPERTYKEY ps3r_PKEY_Device_FriendlyName =
++    { { 0xA45C254E, 0xDF1C, 0x4EFD, { 0x80, 0x20, 0x67, 0xD1, 0x46, 0xA8, 0x50, 0xE0 } }, 14 };
++
++static void audio_device_name(IMMDevice* dev, wchar_t* out, size_t cap)
++{
++    out[0] = 0;
++    IPropertyStore* ps = NULL;
++    if (FAILED(dev->lpVtbl->OpenPropertyStore(dev, STGM_READ, &ps)) || !ps) return;
++    PROPVARIANT pv;
++    PropVariantInit(&pv);
++    if (SUCCEEDED(ps->lpVtbl->GetValue(ps, &ps3r_PKEY_Device_FriendlyName, &pv)) &&
++        pv.vt == VT_LPWSTR && pv.pwszVal)
++        wcsncpy_s(out, cap, pv.pwszVal, _TRUNCATE);
++    PropVariantClear(&pv);
++    ps->lpVtbl->Release(ps);
++}
++
++static int audio_name_has(const wchar_t* name, const wchar_t* needle)
++{
++    if (!needle[0]) return 1;
++    for (; *name; name++) {
++        const wchar_t* a = name; const wchar_t* b = needle;
++        while (*a && *b && towlower(*a) == towlower(*b)) { a++; b++; }
++        if (!*b) return 1;
++    }
++    return 0;
++}
++
++static int audio_is_controller(const wchar_t* n)
++{
++    return audio_name_has(n, L"Wireless Controller") || audio_name_has(n, L"DualSense") ||
++           audio_name_has(n, L"DUALSHOCK");
++}
++
+ static int audio_backend_init(void)
+ {
+     HRESULT hr;
+@@ -257,8 +306,40 @@ static int audio_backend_init(void)
+     IMMDevice* device = NULL;
+     hr = enumerator->lpVtbl->GetDefaultAudioEndpoint(enumerator, eRender,
+                                                       eConsole, &device);
++    {
++        wchar_t name[256] = L"", want[128] = L"";
++        const char* w = getenv("PS3_AUDIO_DEVICE");
++        if (w && *w) MultiByteToWideChar(CP_UTF8, 0, w, -1, want, 128);
++        if (SUCCEEDED(hr) && device) audio_device_name(device, name, 256);
++        const int pick = !(SUCCEEDED(hr) && device) ||
++                         (want[0] ? !audio_name_has(name, want) : audio_is_controller(name));
++        if (pick) {
++            IMMDeviceCollection* col = NULL;
++            if (SUCCEEDED(enumerator->lpVtbl->EnumAudioEndpoints(enumerator, eRender,
++                                                                  DEVICE_STATE_ACTIVE, &col)) && col) {
++                UINT n = 0;
++                col->lpVtbl->GetCount(col, &n);
++                for (UINT i = 0; i < n; i++) {
++                    IMMDevice* d = NULL;
++                    if (FAILED(col->lpVtbl->Item(col, i, &d)) || !d) continue;
++                    wchar_t nm[256];
++                    audio_device_name(d, nm, 256);
++                    if (want[0] ? audio_name_has(nm, want) : !audio_is_controller(nm)) {
++                        if (device) device->lpVtbl->Release(device);
++                        device = d; hr = S_OK;
++                        wcsncpy_s(name, 256, nm, _TRUNCATE);
++                        break;
++                    }
++                    d->lpVtbl->Release(d);
++                }
++                col->lpVtbl->Release(col);
++            }
++        }
++        fprintf(stderr, "[cellAudio] output device: %ls%s\n", name[0] ? name : L"(default)",
++                pick ? " (chosen over the Windows default)" : "");
++    }
+     enumerator->lpVtbl->Release(enumerator);
+-    if (FAILED(hr)) {
++    if (FAILED(hr) || !device) {
+         printf("[cellAudio] Failed to get default audio endpoint: 0x%08lX\n", hr);
+         return -1;
+     }
+@@ -464,6 +545,24 @@ static void audio_mix_one_block(void)
+ 
+         u32 nch    = (u32)port->param.nChannel;
+         u32 nblock = (u32)port->param.nBlock;
++
++        /* A late producer: the block about to be read is one the title has not
++         * written yet. Reading it plays a stale block, and a title whose ring
++         * logic writes only while (w - r) mod n < lead (w == r meaning "full")
++         * then waits a whole lap: n blocks of silence per hiccup. Hold instead:
++         * play silence for this period, keep the read index, and publish the
++         * block before it so the producer may write the one we wait for. Bounded,
++         * so a producer that stopped writing does not freeze the port. */
++        if (s_starve_fn && nblock && port->hold_count < 16 &&
++            s_starve_fn((u32)p, (u32)(port->read_index % nblock))) {
++            port->hold_count++;
++            g_audio_holds++;
++            if (port->read_idx_addr)
++                vm_write64((u32)port->read_idx_addr, (port->read_index + nblock - 1) % nblock);
++            continue;
++        }
++        port->hold_count = 0;
++
+         float level = port->param.level;
+         if (level <= 0.0f) level = 1.0f;
+         if (level > 1.0f) level = 1.0f;
+@@ -626,20 +725,20 @@ static unsigned __stdcall audio_mix_thread_func(void* arg)
+         audio_backend_submit(s_mix_buffer, CELL_AUDIO_BLOCK_SAMPLES);
+         /* AUDIO_RATE=1: blocks mixed vs real time, and frames dropped. */
+         { static int on = -1; if (on < 0) on = getenv("AUDIO_RATE") ? 1 : 0;
+-          if (on) { static ULONGLONG t0; static unsigned n, z; static unsigned long long d0, u0;
++          if (on) { static ULONGLONG t0; static unsigned n, z; static unsigned long long d0, u0, h0;
+             ULONGLONG now = GetTickCount64(); if (!t0) t0 = now; n++;
+             { int nz = 0; for (u32 i = 0; i < CELL_AUDIO_BLOCK_SAMPLES * 2; i++) if (s_mix_buffer[i] != 0.0f) { nz = 1; break; }
+               if (!nz) z++; }
+             if (now - t0 >= 5000) {
+-                fprintf(stderr, "[audio-rate] %.1f blocks/s (real time 187.5), silent %.1f%%, dropped %.0f frames/s, underruns %llu, device buf %u%c",
++                fprintf(stderr, "[audio-rate] %.1f blocks/s (real time 187.5), silent %.1f%%, dropped %.0f frames/s, underruns %llu, holds %llu, device buf %u%c",
+                         n * 1000.0 / (now - t0), n ? 100.0 * z / n : 0.0, (g_audio_dropped - d0) * 1000.0 / (now - t0),
+-                        g_audio_underruns - u0,
++                        g_audio_underruns - u0, g_audio_holds - h0,
+                 #if AUDIO_BACKEND_WASAPI
+                         (unsigned)s_wasapi_buf_frames, 10);
+ #else
+                         0u, 10);
+ #endif
+-                n = z = 0; d0 = g_audio_dropped; u0 = g_audio_underruns; t0 = now; } } }
++                n = z = 0; d0 = g_audio_dropped; u0 = g_audio_underruns; h0 = g_audio_holds; t0 = now; } } }
+ 
+         /* Notify event queues */
+         audio_notify_event_queues();
+diff --git a/runtime/ppu/ppu_hle.cpp b/runtime/ppu/ppu_hle.cpp
+index 15d4ef6..7a954df 100644
+--- a/runtime/ppu/ppu_hle.cpp
++++ b/runtime/ppu/ppu_hle.cpp
+@@ -108,6 +108,7 @@ typedef uint64_t (*hle_generic)(uint64_t, uint64_t, uint64_t, uint64_t,
+ 
+ /* Host VM store (defined in ppu_loader.cpp) — used for the TOC save below. */
+ void vm_write64(uint64_t addr, uint64_t val);
++uint64_t vm_read64(uint64_t addr);   /* ppu_loader.cpp: the PRX stack-argument copy */
+ 
+ /* Breadcrumb for the crash reporter: the last firmware import dispatched, so a
+  * host AV inside an HLE handler names the culprit NID/function. */
+@@ -650,6 +651,15 @@ extern "C" void ps3_hle_call(uint32_t nid, ppu_context* ctx)
+              * Opt out with YDKJ_NO_REENTRY_ISO=1. */
+             { static int _ri=-1; if(_ri<0){ const char* e=getenv("YDKJ_NO_REENTRY_ISO"); _ri = (e && e[0]=='1') ? 0 : 1; }
+               if(_ri){ uint64_t _sr1=ctx->gpr[1]; ctx->gpr[1]=(ctx->gpr[1]-0x1000)&~0xFull;
++                /* The fresh slice must carry the caller's parameter area: arguments
++                 * 9 and up are passed at 0x70(r1), and the callee reads them at its
++                 * entry r1. Without this copy every PRX export with more than eight
++                 * arguments read garbage -- _cellSpursCreateJobQueueWithJobDescriptorPool
++                 * (12 args) failed CELL_SPURS_JOB_ERROR_ALIGN, CRI ADX2's job queue was
++                 * never created, and Sakatsuku had no sound. PRX_STACKARGS_COPY=0 off. */
++                { static int _sa=-1; if(_sa<0){ const char* e=getenv("PRX_STACKARGS_COPY"); _sa = (e && e[0]=='0') ? 0 : 1; }
++                  if(_sa) for (uint32_t _o = 0x30; _o < 0x170; _o += 8)
++                      vm_write64(ctx->gpr[1] + _o, vm_read64(_sr1 + _o)); }
+                 ps3_indirect_call(ctx); ctx->gpr[1]=_sr1; }
+               else ps3_indirect_call(ctx); }       /* -> registered lifted libsre fn; r3=ret */
+             /* A real PRX serving this import is a different implementation of it,
+diff --git a/runtime/syscalls/sys_memory.c b/runtime/syscalls/sys_memory.c
+index 66eef25..927f141 100644
+--- a/runtime/syscalls/sys_memory.c
++++ b/runtime/syscalls/sys_memory.c
+@@ -210,7 +210,12 @@ int64_t sys_memory_get_page_attribute(ppu_context* ctx)
+         write_be32(attr_out + 0x00, 0);          /* attribute    (hi) */
+         write_be32(attr_out + 0x04, 0x00040000); /* attribute    (lo) PROT_READ_WRITE-ish */
+         write_be32(attr_out + 0x08, 0);          /* access_right (hi) */
+-        write_be32(attr_out + 0x0C, 0x00000008); /* access_right (lo) PPU_THREAD-ish */
++        /* access_right (lo), as RPCS3 reports it: the 0xD stack region is
++         * PPU-thread only (0x8), everything else SYS_MEMORY_ACCESS_RIGHT_ANY (0xF).
++         * libspurs_jq's job-queue create requires the SPU_THR bit (0x2) on the
++         * queue memory; with 0x8 everywhere it returned CELL_SPURS_JOB_ERROR_INVAL,
++         * so CRI ADX2 never got its job queue (Sakatsuku: no sound). */
++        write_be32(attr_out + 0x0C, (addr >> 28) == 0xDu ? 0x00000008u : 0x0000000Fu);
+         write_be32(attr_out + 0x10, page_size);  /* page_size */
+         write_be32(attr_out + 0x14, 0);          /* pad */
+     }

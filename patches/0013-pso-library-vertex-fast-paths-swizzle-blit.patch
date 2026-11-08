@@ -1,0 +1,430 @@
+diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
+index 7431704..c97850a 100644
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -1070,6 +1070,38 @@ static u32 nv309e_swz(u32 x, u32 y, u32 l2w, u32 l2h)
+     return off;
+ }
+ 
++/* The low 16 bits of v moved to the even bit positions (bit i -> bit 2i). */
++static inline u32 nv309e_spread(u32 v)
++{
++    v &= 0xFFFFu;
++    v = (v | (v << 8)) & 0x00FF00FFu;
++    v = (v | (v << 4)) & 0x0F0F0F0Fu;
++    v = (v | (v << 2)) & 0x33333333u;
++    v = (v | (v << 1)) & 0x55555555u;
++    return v;
++}
++
++/* [nv3089] every 5 s: blits per path and the pixels the CPU moved, so a
++ * frame-time question can see which copy costs it. NV3089_STATS=0 = quiet.
++ * path 0 = GPU resolve only, 1 = swizzled pyramid (CPU), 2 = row copy (CPU),
++ * 3 = per-pixel copy (CPU). */
++static void nv3089_stat(int path, u64 px)
++{
++    static int on = -1;
++    static unsigned n[4]; static u64 p[4]; static unsigned long long t0;
++    if (on < 0) { const char* e = getenv("NV3089_STATS"); on = !(e && *e == '0'); }
++    if (!on) return;
++    n[path]++; p[path] += px;
++    const unsigned long long now = ps3_ms_now();
++    if (!t0) t0 = now;
++    if (now - t0 >= 5000) {
++        fprintf(stderr, "[nv3089] last 5 s: gpu=%u swz=%u/%llukpx row=%u/%llukpx pix=%u/%llukpx\n",
++                n[0], n[1], (unsigned long long)(p[1] / 1000), n[2], (unsigned long long)(p[2] / 1000),
++                n[3], (unsigned long long)(p[3] / 1000));
++        memset(n, 0, sizeof n); memset(p, 0, sizeof p); t0 = now;
++    }
++}
++
+ /* IMAGE_IN_POINT is 12.4 fixed point per axis; DS_DX / DT_DY step the source in 20 fractional bits (1.0 = 0x100000).
+  * The origin in the steps' scale is therefore origin << 16: an origin of one texel (0x10) is 0x100000. */
+ static inline u64 nv3089_origin(u32 p) { return (u64)p << 16; }
+@@ -1171,7 +1203,7 @@ static void nv3089_blit(void)
+          * frame-clock thread. NV3089_CPU_RESOLVE=1 keeps the CPU copy too. */
+         { static int cpu = -1;
+           if (cpu < 0) { const char* e = getenv("NV3089_CPU_RESOLVE"); cpu = (e && *e == '1') ? 1 : 0; }
+-          if (rok && !cpu) return; }
++          if (rok && !cpu) { nv3089_stat(0, 0); return; } }
+     }
+     /* Only the 32-bit colour formats are handled; anything else would need a
+      * per-format converter and is better skipped loudly than written wrong. */
+@@ -1207,6 +1239,28 @@ static void nv3089_blit(void)
+         { extern u8* vm_base;
+           const u8* sbase = vm_base + src2;
+           u8* dbase = vm_base + dst2;
++          nv3089_stat(1, (u64)out_w * out_h);
++          /* The Morton offset split per axis -- an x part per column, a y
++           * part per row -- and the source column per x, each computed once
++           * per blit instead of nv309e_swz's bit loop per pixel. Same offsets:
++           * nv309e_swz(x, y) == xs[x] | ys. NV309E_SWZ_LOOP=1 = old loop. */
++          static u32 xs[4096], sxc[4096];
++          static int old_loop = -1;
++          if (old_loop < 0) { const char* e = getenv("NV309E_SWZ_LOOP"); old_loop = (e && *e == '1') ? 1 : 0; }
++          if (!old_loop && out_w <= 4096u && l2w <= 12u && l2h <= 12u) {
++              const u32 nb = l2w < l2h ? l2w : l2h, m = (1u << nb) - 1u;
++              for (u32 x = 0; x < out_w; x++) {
++                  xs[x] = nv309e_spread(x & m) | (l2w > l2h ? (x >> nb) << (2 * nb) : 0u);
++                  sxc[x] = (u32)((nv3089_origin(u0b) + (u64)x * s_nv3089.ds_dx) >> 20) * 4u;
++              }
++              for (u32 y = 0; y < out_h; y++) {
++                  const u64 sv = nv3089_origin(v0b) + (u64)y * s_nv3089.dt_dy;
++                  const u8* srow = sbase + (u32)(sv >> 20) * in_pitch;
++                  const u32 ys = (nv309e_spread(y & m) << 1) | (l2h > l2w ? (y >> nb) << (2 * nb) : 0u);
++                  for (u32 x = 0; x < out_w; x++)
++                      memcpy(dbase + (u64)(xs[x] | ys) * 4, srow + sxc[x], 4);
++              }
++          } else
+           for (u32 y = 0; y < out_h; y++) {
+               u64 sv = nv3089_origin(v0b) + (u64)y * s_nv3089.dt_dy;
+               const u8* srow = sbase + (u32)(sv >> 20) * in_pitch;
+@@ -1288,6 +1342,7 @@ static void nv3089_blit(void)
+         if ((u64)out_x + xb > cx1) xb = cx1 > out_x ? cx1 - out_x : 0;
+         if (xa < xb) {
+             const u32 n = (xb - xa) * bpp;
++            nv3089_stat(2, (u64)(xb - xa) * out_h);
+             for (u32 y = 0; y < out_h; y++) {
+                 const u32 dy = out_y + y;
+                 if (dy < cy0 || dy >= cy1) continue;
+@@ -1299,6 +1354,7 @@ static void nv3089_blit(void)
+         }
+     } else
+     for (u32 y = 0; y < out_h; y++) {
++        if (y == 0) nv3089_stat(3, (u64)out_w * out_h);
+         u32 dy = out_y + y;
+         if (dy < cy0 || dy >= cy1) continue;
+         u64 sv = nv3089_origin(v0) + (u64)y * s_nv3089.dt_dy;
+diff --git a/libs/video/rsx_live_draw.c b/libs/video/rsx_live_draw.c
+index 1282db6..02ff2dc 100644
+--- a/libs/video/rsx_live_draw.c
++++ b/libs/video/rsx_live_draw.c
+@@ -587,6 +587,7 @@ static u64 g_ld_present_total = 0;
+ static LONGLONG g_ld_qpc_frequency = 0;
+ static int g_ld_present_dumped = 0;
+ static LONGLONG ld_slow_qpc(void);                 /* defined with ld_slow_note */
++static void ld_pso_library_save(int force);        /* defined before build_pso */
+ static volatile int g_ld_present_nowait = 0;       /* fast-forward: no vsync, show <= ~60/s */
+ void rsx_live_draw_set_present_nowait(int on) { g_ld_present_nowait = on ? 1 : 0; }
+ static unsigned long long g_ld_fence_wait_us = 0;  /* GPU fence waits in flushes */
+@@ -1752,6 +1753,7 @@ static void ld_flush(ld_flush_reason reason)
+                   g_ld_memo_stats[0], g_ld_memo_stats[1], g_ld_memo_stats[2], g_ld_memo_stats[3]);
+           memset(g_ld_memo_stats, 0, sizeof g_ld_memo_stats);
+           memset(cnt, 0, sizeof cnt); t0 = now.QuadPart;
++          ld_pso_library_save(0);   /* new PSOs since the last save, at most every 10 s */
+       } }
+     const HRESULT close_hr = g.list->lpVtbl->Close(g.list);
+     if (FAILED(close_hr)) {
+@@ -4487,9 +4489,92 @@ static u32 vp_txl_unit_mask(const u8* ucode, u32 instrs)
+     return mask;
+ }
+ 
++/* PSO disk cache (ID3D12PipelineLibrary). The shaders were already cached on
++ * disk, but every pipeline state was still built by the driver on its first
++ * use in each run: 20-60 ms each, a few hundred ms when a new scene brings
++ * several (the match's 300+ ms present spikes). Each PSO is stored under its
++ * key mixed with its two shader blobs, so a different program or compiler
++ * setting can never load a stale one; any mismatch (driver update, other GPU,
++ * different desc) falls back to a normal build. Saved next to the shader cache
++ * every 10 s while new PSOs arrive and at shutdown. LD_NO_PSO_LIBRARY=1 off. */
++static ID3D12PipelineLibrary* g_pso_lib = NULL;
++static void* g_pso_lib_blob = NULL;           /* must outlive the library */
++static int g_pso_lib_state = 0;               /* 0 untried, 1 ready, -1 unavailable */
++static int g_pso_lib_dirty = 0;
++static unsigned g_pso_lib_loaded = 0, g_pso_lib_built = 0;
++static LONGLONG g_pso_lib_saved_qpc = 0;
++
++static void ld_pso_library_path(char* out, size_t cap)
++{
++    snprintf(out, cap, "%s\\pso_library_v1.bin", g_ld_shader_disk_dir);
++}
++
++static void ld_pso_library_init(void)
++{
++    if (g_pso_lib_state) return;
++    g_pso_lib_state = -1;
++    if (getenv("LD_NO_PSO_LIBRARY") || !shader_disk_cache_prepare()) return;
++    ID3D12Device1* dev1 = NULL;
++    if (FAILED(g.dev->lpVtbl->QueryInterface(g.dev, &IID_ID3D12Device1, (void**)&dev1)) || !dev1) return;
++    char path[MAX_PATH];
++    ld_pso_library_path(path, sizeof path);
++    size_t size = 0;
++    FILE* f = fopen(path, "rb");
++    if (f) {
++        fseek(f, 0, SEEK_END); const long n = ftell(f); fseek(f, 0, SEEK_SET);
++        if (n > 0 && (g_pso_lib_blob = malloc((size_t)n)) != NULL &&
++            fread(g_pso_lib_blob, 1, (size_t)n, f) == (size_t)n) size = (size_t)n;
++        fclose(f);
++    }
++    HRESULT hr = E_FAIL;
++    if (size)
++        hr = dev1->lpVtbl->CreatePipelineLibrary(dev1, g_pso_lib_blob, size, &IID_ID3D12PipelineLibrary, (void**)&g_pso_lib);
++    if (FAILED(hr)) {
++        if (size) fprintf(stderr, "[pso-library] '%s' not usable (hr=0x%08lX: driver/GPU changed?) -- starting a new one\n",
++                          path, (unsigned long)hr);
++        free(g_pso_lib_blob); g_pso_lib_blob = NULL; g_pso_lib = NULL;
++        hr = dev1->lpVtbl->CreatePipelineLibrary(dev1, NULL, 0, &IID_ID3D12PipelineLibrary, (void**)&g_pso_lib);
++    }
++    dev1->lpVtbl->Release(dev1);
++    if (FAILED(hr) || !g_pso_lib) {
++        fprintf(stderr, "[pso-library] unavailable (hr=0x%08lX)\n", (unsigned long)hr);
++        g_pso_lib = NULL;
++        return;
++    }
++    g_pso_lib_state = 1;
++    fprintf(stderr, "[pso-library] %s (%zu bytes) from '%s'\n", size ? "loaded" : "new", size, path);
++}
++
++static void ld_pso_library_save(int force)
++{
++    if (g_pso_lib_state != 1 || !g_pso_lib_dirty) return;
++    LARGE_INTEGER now, f; QueryPerformanceCounter(&now); QueryPerformanceFrequency(&f);
++    if (!force && g_pso_lib_saved_qpc && now.QuadPart - g_pso_lib_saved_qpc < 10 * f.QuadPart) return;
++    g_pso_lib_saved_qpc = now.QuadPart;
++    const SIZE_T n = g_pso_lib->lpVtbl->GetSerializedSize(g_pso_lib);
++    void* buf = n ? malloc(n) : NULL;
++    if (!buf) return;
++    if (SUCCEEDED(g_pso_lib->lpVtbl->Serialize(g_pso_lib, buf, n))) {
++        char path[MAX_PATH], tmp[MAX_PATH + 8];
++        ld_pso_library_path(path, sizeof path);
++        snprintf(tmp, sizeof tmp, "%s.tmp", path);
++        FILE* fo = fopen(tmp, "wb");
++        if (fo) {
++            const int ok = fwrite(buf, 1, n, fo) == n;
++            fclose(fo);
++            if (ok && MoveFileExA(tmp, path, MOVEFILE_REPLACE_EXISTING)) {
++                g_pso_lib_dirty = 0;
++                fprintf(stderr, "[pso-library] saved %zu bytes (this run: %u loaded, %u built)\n",
++                        (size_t)n, g_pso_lib_loaded, g_pso_lib_built);
++            }
++        }
++    }
++    free(buf);
++}
++
+ static ID3D12PipelineState* build_pso(
+     const char* vs_hlsl, const char* ps_hlsl, const render_state_t* rs,
+-    const rsx_vertex_layout_plan* masked_layout, int packed_offsets)
++    const rsx_vertex_layout_plan* masked_layout, int packed_offsets, u64 pso_key)
+ {
+     ID3DBlob *vs = NULL, *ps = NULL, *err = NULL;
+     static u32 compile_fail_logs = 0;
+@@ -4680,8 +4765,27 @@ static ID3D12PipelineState* build_pso(
+     const LONGLONG create_begin = ld_profile_qpc();
+ #endif
+     const LONGLONG slow_pso = ld_slow_qpc();
+-    HRESULT hr = g.dev->lpVtbl->CreateGraphicsPipelineState(
+-        g.dev, &pd, &IID_ID3D12PipelineState, (void**)&pso);
++    ld_pso_library_init();
++    WCHAR lib_name[40] = L"";
++    HRESULT hr = E_FAIL;
++    if (g_pso_lib) {
++        const u64 id = fnv1a(pd.PS.pShaderBytecode, (u32)pd.PS.BytecodeLength,
++                             fnv1a(pd.VS.pShaderBytecode, (u32)pd.VS.BytecodeLength, pso_key));
++        swprintf(lib_name, 40, L"p%016llX", (unsigned long long)id);
++        hr = g_pso_lib->lpVtbl->LoadGraphicsPipeline(g_pso_lib, lib_name, &pd,
++                                                     &IID_ID3D12PipelineState, (void**)&pso);
++        if (SUCCEEDED(hr)) g_pso_lib_loaded++;
++        else pso = NULL;
++    }
++    if (!pso) {
++        hr = g.dev->lpVtbl->CreateGraphicsPipelineState(
++            g.dev, &pd, &IID_ID3D12PipelineState, (void**)&pso);
++        if (SUCCEEDED(hr) && g_pso_lib && lib_name[0]) {
++            g_pso_lib_built++;
++            if (SUCCEEDED(g_pso_lib->lpVtbl->StorePipeline(g_pso_lib, lib_name, pso)))
++                g_pso_lib_dirty = 1;
++        }
++    }
+     ld_slow_note("pso create", slow_pso, (u32)pd.VS.BytecodeLength, 0);
+ #if defined(YZ_PERF_PROFILE)
+     g_ld_profile.total.create_pso_qpc +=
+@@ -5170,7 +5274,7 @@ static ID3D12PipelineState* get_pso(
+       } }
+     if (vi > 0 && fi > 0)
+         pso = build_pso(
+-            vs_hlsl, ps_hlsl, &rs, masked_layout, packed_payload);
++            vs_hlsl, ps_hlsl, &rs, masked_layout, packed_payload, key);
+ 
+     g.psos[g.n_psos].key = key;
+     g.psos[g.n_psos].pso = pso;
+@@ -5604,7 +5708,23 @@ static void fetch_batches_hoisted(
+             dc.fetch_ok = 0;
+             return;
+         }
+-        for (u32 i = 0; i < dc.n_refs; i++) {
++        /* One attribute at a time across all vertices, its format switch
++         * hoisted out of the loop (rsx_vertex_fetch_many). Same values as
++         * rsx_vertex_fetch_one per vertex, which re-ran the switch for every
++         * component: ~17% of the RSX thread in a Sakatsuku match.
++         * LD_FETCH_ONE=1 restores the per-vertex loop. */
++        static int fetch_one_loop = -1;
++        if (fetch_one_loop < 0) {
++            const char* e = getenv("LD_FETCH_ONE");
++            fetch_one_loop = (e && *e == '1') ? 1 : 0;
++        }
++        if (!fetch_one_loop && layout->stride) {
++            if (!rsx_vertex_fetch_many(&dc.fetch_plan, dc.refs, dc.n_refs,
++                                       dc.compact_verts)) {
++                dc.fetch_ok = 0;
++                return;
++            }
++        } else for (u32 i = 0; i < dc.n_refs; i++) {
+             u8* destination = layout->stride
+                 ? dc.compact_verts + (u64)i * layout->stride : NULL;
+             if (!rsx_vertex_fetch_one(
+@@ -7183,8 +7303,10 @@ static u32 topology_index_count(u32 prim)
+ 
+ static u32 topology_vertex_index(u32 occurrence)
+ {
++    /* rsx_vertex_remap_index, inline: it ran once per index as a call. */
+     return dc.refs_remapped
+-        ? rsx_vertex_remap_index(&dc.ref_remap, occurrence)
++        ? (occurrence < dc.ref_remap.occurrence_capacity
++               ? dc.ref_remap.occurrence_to_unique[occurrence] : occurrence)
+         : occurrence;
+ }
+ 
+@@ -10522,6 +10644,7 @@ void rsx_live_draw_present(u32 buffer_id)
+ void rsx_live_draw_shutdown(void)
+ {
+     if (!g.ready) return;
++    ld_pso_library_save(1);
+     ld_vertex_diag_emit("shutdown", 1);
+     ld_present_measure_dump();
+     /* let the GPU drain, then release. (Best-effort; process teardown also
+diff --git a/libs/video/rsx_vertex_compact.c b/libs/video/rsx_vertex_compact.c
+index e31b611..102cfb1 100644
+--- a/libs/video/rsx_vertex_compact.c
++++ b/libs/video/rsx_vertex_compact.c
+@@ -384,7 +384,35 @@ int rsx_vertex_fetch_many(
+         case RSX_VTX_TYPE_SINT16:
+             RSX_FETCH_LOOP(v[c] = (float)(s16)((src[c * 2] << 8) | src[c * 2 + 1]))
+             break;
+-        default:   /* RSX_VTX_TYPE_CMP32: one packed word, whatever the size */
++        case RSX_VTX_TYPE_CMP32:
++            /* One packed 11:11:10 word whatever the size, unpacked exactly as
++             * rsx_vertex_decode_element does. */
++            for (u32 i = 0; i < count; i++) {
++                float* v = (float*)(out + (size_t)i * stride + slot * 16u);
++                const u32 element = plain
++                    ? ((refs[i].vertex_id + refs[i].base_index) & 0x000FFFFFu)
++                    : rsx_vertex_element_index(refs[i].vertex_id, refs[i].base_index,
++                                               fetch->desc.frequency, modulo);
++                if (element - first > span) {
++                    if (!rsx_vertex_fetch_attr_value(plan, attr, &refs[i], v)) return 0;
++                    continue;
++                }
++                const u8* src = base + (u64)(element - first) * fstride;
++                const u32 word = ((u32)src[0] << 24) | ((u32)src[1] << 16) |
++                                 ((u32)src[2] << 8) | (u32)src[3];
++                s32 x = (s32)(word & 0x7FF);
++                s32 y = (s32)((word >> 11) & 0x7FF);
++                s32 z = (s32)((word >> 22) & 0x3FF);
++                if (x & 0x400) x -= 0x800;
++                if (y & 0x400) y -= 0x800;
++                if (z & 0x200) z -= 0x400;
++                v[0] = (float)x / 1023.0f;
++                v[1] = (float)y / 1023.0f;
++                v[2] = (float)z / 511.0f;
++                v[3] = 1.0f;
++            }
++            break;
++        default:
+             for (u32 i = 0; i < count; i++)
+                 if (!rsx_vertex_fetch_attr_value(plan, attr, &refs[i],
+                         (float*)(out + (size_t)i * stride + slot * 16u)))
+@@ -425,6 +453,68 @@ int rsx_vertex_remap_build(
+         remap->occurrence_capacity = count;
+     }
+ 
++    /* Direct map. When every reference shares one base_index and the vertex
++     * ids fall in a window of at most RSX_REMAP_DIRECT_MAX -- an indexed mesh,
++     * nearly every draw -- a generation-stamped array indexed by the id
++     * replaces the hash table: no mixing, no probing. Unique ids are still
++     * handed out in first-occurrence order, so refs[] and
++     * occurrence_to_unique come out exactly as the hash path builds them. */
++    {
++        enum { RSX_REMAP_DIRECT_MAX = 1u << 18 };
++        const u32 base0 = refs[0].base_index;
++        u32 vmin = refs[0].vertex_id, vmax = vmin, same = 1u;
++        for (u32 i = 1; i < count; i++) {
++            const u32 v = refs[i].vertex_id;
++            if (v < vmin) vmin = v;
++            if (v > vmax) vmax = v;
++            same &= (u32)(refs[i].base_index == base0);
++        }
++        int direct = same && (vmax - vmin) < RSX_REMAP_DIRECT_MAX;
++        const u32 window = vmax - vmin + 1u;
++        if (direct && window > remap->direct_capacity) {
++            u32 cap = remap->direct_capacity ? remap->direct_capacity : 4096u;
++            while (cap < window) cap *= 2u;
++            u32* stamp = (u32*)realloc(remap->direct_stamp, (size_t)cap * sizeof(u32));
++            if (stamp) remap->direct_stamp = stamp;
++            u32* value = stamp ? (u32*)realloc(remap->direct_value, (size_t)cap * sizeof(u32)) : NULL;
++            if (value) remap->direct_value = value;
++            if (stamp && value) {
++                memset(remap->direct_stamp, 0, (size_t)cap * sizeof(u32));
++                remap->direct_capacity = cap;
++                remap->direct_generation = 0u;
++            } else {
++                direct = 0;   /* out of memory: the hash path below */
++            }
++        }
++        if (direct) {
++            if (++remap->direct_generation == 0u) {
++                memset(remap->direct_stamp, 0,
++                       (size_t)remap->direct_capacity * sizeof(u32));
++                remap->direct_generation = 1u;
++            }
++            const u32 gen = remap->direct_generation;
++            u32* const stamp = remap->direct_stamp;
++            u32* const value = remap->direct_value;
++            u32* const occ = remap->occurrence_to_unique;
++            u32 unique = 0;
++            for (u32 occurrence = 0; occurrence < count; occurrence++) {
++                const rsx_vertex_ref ref = refs[occurrence];
++                const u32 d = ref.vertex_id - vmin;
++                if (stamp[d] != gen) {
++                    stamp[d] = gen;
++                    value[d] = unique;
++                    refs[unique] = ref;
++                    occ[occurrence] = unique;
++                    unique++;
++                } else {
++                    occ[occurrence] = value[d];
++                }
++            }
++            *unique_count = unique;
++            return 1;
++        }
++    }
++
+     if (count > UINT_MAX / 2u)
+         return 0;
+     u32 slot_capacity = 16u;
+@@ -494,6 +584,8 @@ void rsx_vertex_remap_destroy(rsx_vertex_remap* remap)
+         return;
+     free(remap->occurrence_to_unique);
+     free(remap->slots);
++    free(remap->direct_stamp);
++    free(remap->direct_value);
+     memset(remap, 0, sizeof(*remap));
+ }
+ 
+diff --git a/libs/video/rsx_vertex_compact.h b/libs/video/rsx_vertex_compact.h
+index 6a12f6f..a39123d 100644
+--- a/libs/video/rsx_vertex_compact.h
++++ b/libs/video/rsx_vertex_compact.h
+@@ -44,6 +44,11 @@ typedef struct rsx_vertex_remap {
+     rsx_vertex_remap_slot* slots;
+     u32 slot_capacity;
+     u32 generation;
++    /* Direct map for one base_index over a small id window (see _build). */
++    u32* direct_stamp;
++    u32* direct_value;
++    u32 direct_capacity;
++    u32 direct_generation;
+ } rsx_vertex_remap;
+ 
+ typedef struct rsx_vertex_fetch_attr {

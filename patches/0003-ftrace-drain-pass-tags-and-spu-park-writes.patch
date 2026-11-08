@@ -1,0 +1,129 @@
+diff --git a/include/ps3emu/ps3_ftrace.h b/include/ps3emu/ps3_ftrace.h
+index 84065d2..4b90d1f 100644
+--- a/include/ps3emu/ps3_ftrace.h
++++ b/include/ps3emu/ps3_ftrace.h
+@@ -58,6 +58,10 @@ enum ps3_ft_kind {
+                               * complete; who = render passes, a = depth resolves | colour copies << 16,
+                               * b = 1 present / 0 flush */
+     PS3_FT_HLE         = 15, /* who = PPU tid, a = NID, b = guest lr: an HLE import call */
++    PS3_FT_DRAIN_END   = 16, /* instant: a FIFO drain pass ended; who = 1 parked / 2 flip, a = put, b = get */
++    PS3_FT_PUMP        = 17, /* the host window message pump (Sakatsuku main.cpp) */
++    PS3_FT_PARK_WRITE  = 18, /* instant: an SPU DMA PUT covered the word the RSX walker is
++                              * parked on; who = 2 (SPU), a = spu id, b = PUT ea */
+ };
+ 
+ #if defined(_MSC_VER)
+@@ -82,6 +86,9 @@ typedef struct {
+ } ps3_ft_state;
+ 
+ PS3_FT_SHARED ps3_ft_state g_ps3_ft = { 0 };
++/* EA of the self-JUMP the RSX walker is parked on (0 = not parked), set only
++ * while recording: the PPU and SPU store paths compare against it. */
++PS3_FT_SHARED volatile uint32_t g_ps3_ft_park_ea = 0;
+ 
+ static inline uint64_t ps3_ft_now(void)
+ {
+diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
+index 298ee7d..d5636f5 100644
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -946,6 +946,7 @@ unsigned long long ps3_ms_now(void)
+ static u32 s_sema_offset = 0;   /* NV406E semaphore offset (label window) */
+ static int s_sema_blocked_pass = 0;   /* this drain stopped on a semaphore acquire */
+ static int s_park_pass = 0;           /* this drain stopped on a self-JUMP park */
++static int s_ft_pass_flags = 0;       /* PS3_FTRACE: 1 parked, 2 stopped at a flip */
+ /* The park the walker is waiting on (0 = none), the `put` it saw there, and
+  * since when it has stood with that put: the jump-park grace in the walker. */
+ static u32 park_off, park_put;
+@@ -1956,8 +1957,14 @@ void cellGcm_rsx_process_fifo(void)
+     ReleaseSRWLockExclusive(&s_gcm_fifo_lock);
+     if (ft_t0) {
+         const uint64_t t1 = ps3_ft_now();
++        /* b = why the pass stopped: 1 self-JUMP park, 2 flip (0 = caught up). */
++        const u32 why = (u32)s_ft_pass_flags; s_ft_pass_flags = 0;
++        if (!(why & 1u)) g_ps3_ft_park_ea = 0;
+         if (t1 - ft_t0 >= ps3_ft_min_ns())
+-            ps3_ft_span(PS3_FT_DRAIN, 0, s_ft_sema_t0 ? 1u : 0u, 0, ft_t0, t1);
++            ps3_ft_span(PS3_FT_DRAIN, 0, s_ft_sema_t0 ? 1u : 0u, why, ft_t0, t1);
++        /* Instant: where the pass ended (a = put, b = get) -- a park shows as
++         * get standing still while put moves on. */
++        ps3_ft_span(PS3_FT_DRAIN_END, why, vm_read32(GCM_CONTROL_GUEST_ADDR + 0), s_fifo_getoff, t1, t1);
+     }
+ }
+ 
+@@ -2329,7 +2336,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
+              * then crawled ~1 KB a tick while the title wrote over the
+              * commands ahead of it. */
+             if (gcm_fifo_backlog(put, s_fifo_getoff) < GCM_FIFO_CATCHUP_BYTES)
+-                { why = "flip"; break; }
++                { why = "flip"; s_ft_pass_flags |= 2; break; }
+             continue;
+         }
+ 
+@@ -2384,6 +2391,8 @@ static void gcm_rsx_process_fifo_unlocked(void)
+                   }
+                   why = "parked";
+                   s_park_pass = 1;
++                  s_ft_pass_flags |= 1;
++                  if (PS3_FT_ON()) g_ps3_ft_park_ea = gcm_io2ea(s_fifo_getoff);
+                   break;
+               }
+               if (tgt < s_fifo_getoff) s_fifo_back_jumps++;
+diff --git a/runtime/spu/spu_dma.h b/runtime/spu/spu_dma.h
+index 8c4ccaa..5f6ef17 100644
+--- a/runtime/spu/spu_dma.h
++++ b/runtime/spu/spu_dma.h
+@@ -17,6 +17,7 @@
+ 
+ #include "spu_context.h"
+ #include "../../include/ps3emu/log_first.h"
++#include "../../include/ps3emu/ps3_ftrace.h"   /* park-write probe (PS3_FTRACE) */
+ #include "spu_coherency.h"
+ #include <stdint.h>
+ #include <string.h>
+@@ -1241,6 +1242,45 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
+                       sp2, cmd & 0xFFu, (unsigned long long)ea, size, lsa);
+       } }
+ 
++    /* PS3_FTRACE: an SPU PUT over the self-JUMP the RSX walker is parked on.
++     * SAKA_PARK_LSDUMP=<file> (with PS3_FTRACE): at the first such PUT, write
++     * that SPU's whole local store to <file> and print its last 64 GETs, which
++     * name the source EA of the job code it is running. */
++    {
++#if defined(_MSC_VER)
++#  define SAKA_DIAG_TLS __declspec(thread)
++#else
++#  define SAKA_DIAG_TLS __thread
++#endif
++      static SAKA_DIAG_TLS uint32_t t_gr[64][4]; static SAKA_DIAG_TLS unsigned t_gn;
++      static const char* s_pdump = (const char*)1;
++      if (s_pdump == (const char*)1) s_pdump = getenv("SAKA_PARK_LSDUMP");
++      if (s_pdump && (cmd & 0xFF) >= 0x40u && (cmd & 0xFF) <= 0x4Fu) {
++          uint32_t* r = t_gr[t_gn++ & 63];
++          r[0] = (uint32_t)ea; r[1] = lsa; r[2] = size; r[3] = cmd & 0xFFu;
++      }
++      const uint32_t pe = g_ps3_ft_park_ea;
++      if (pe && (cmd & 0xFF) >= 0x20u && (cmd & 0xFF) <= 0x2Fu &&
++          (uint32_t)ea <= pe && pe < (uint32_t)ea + size) {
++          const uint64_t t = ps3_ft_now();
++          ps3_ft_span(PS3_FT_PARK_WRITE, 2, spu->spu_id, (uint32_t)ea, t, t);
++          static volatile long s_pdumped = 0;
++          if (s_pdump && InterlockedExchange(&s_pdumped, 1) == 0) {
++              FILE* f = fopen(s_pdump, "wb");
++              if (f) { fwrite(spu->ls, 1, 0x40000, f); fclose(f); }
++              fprintf(stderr, "[park-dump] spu=0x%X pc=0x%05X lr=0x%05X put ea=0x%08X size=%u lsa=0x%05X -> %s\n",
++                      spu->spu_id, (unsigned)(spu->pc & 0x3FFFF), (unsigned)(spu->gpr[0]._u32[0] & 0x3FFFF),
++                      (uint32_t)ea, size, lsa, s_pdump);
++              const unsigned n = t_gn < 64 ? t_gn : 64;
++              for (unsigned i = 0; i < n; i++) {
++                  const uint32_t* g = t_gr[(t_gn - n + i) & 63];
++                  fprintf(stderr, "[park-dump] get#%u cmd=0x%02X ea=0x%08X lsa=0x%05X size=0x%X\n",
++                          i, g[3], g[0], g[1], g[2]);
++              }
++              fflush(stderr);
++          }
++      } }
++
+     /* SPU_PUTHIST=1: where the SPUs actually WRITE, by 1 MB destination bucket
+      * and transfer size.
+      *

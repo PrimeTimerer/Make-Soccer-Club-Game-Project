@@ -1,0 +1,723 @@
+--- a/libs/video/rsx_live_draw.c
++++ b/libs/video/rsx_live_draw.c
+@@ -6093,6 +6093,596 @@
+     dc.n_verts = dc.n_refs;
+ }
+ 
++/* ---------------------------------------------------------------------------
++ * Vertex reuse census (LD_VTX_REUSE_STATS=1; diagnostic only, draws nothing
++ * differently). For each compact-path group it asks what a persistent vertex
++ * cache could have reused: the same key (layout, attribute sources and
++ * formats, index source and batches) seen before -- earlier in this frame or
++ * in an earlier one -- with none of its source pages written since (the
++ * texture write watch's generation table). A hash of the converted output
++ * checks each such hit; a hit whose output changed counts as a false hit.
++ * Once a second: [vreuse] shares as "% of groups / % of vertices". */
++static int ld_vreuse_on(void)
++{
++    static int on = -1;
++    if (on < 0) { const char* e = getenv("LD_VTX_REUSE_STATS"); on = (e && *e == '1') ? 1 : 0; }
++    return on;
++}
++
++#define LD_VRU_SLOTS (1u << 16)
++typedef struct { u64 key, out; u32 gen, frame; } ld_vru_slot;
++static ld_vru_slot* g_vru;   /* by key */
++static ld_vru_slot* g_vrc;   /* outputs seen, by output hash (key = out) */
++static u32 g_vru_fill, g_vrc_fill;
++static struct {
++    unsigned long long d, v, hit_d, hit_v, intra_d, intra_v, dirty_d, dirty_v,
++        dirty_same_d, new_d, new_v, new_seen_d, new_seen_v, nosrc_d, nosrc_v,
++        nosrc_same_d, inl_d, inl_v, false_hit;
++    LONGLONG qpc;
++} g_vrs;
++
++static u64 ld_vr_mix(u64 h, u64 v)
++{
++    h ^= v;
++    h *= 0x9E3779B97F4A7C15ull;
++    return h ^ (h >> 29);
++}
++
++static u64 ld_vr_bytes(u64 h, const u8* p, size_t n)
++{
++    size_t i = 0;
++    for (; i + 8 <= n; i += 8) { u64 v; memcpy(&v, p + i, 8); h = ld_vr_mix(h, v); }
++    if (i < n) { u64 v = 0; memcpy(&v, p + i, n - i); h = ld_vr_mix(h, v); }
++    return ld_vr_mix(h, (u64)n);
++}
++
++static ld_vru_slot* ld_vr_find(ld_vru_slot* t, u32* fill, u64 key, int insert)
++{
++    if (*fill > LD_VRU_SLOTS / 2) { memset(t, 0, LD_VRU_SLOTS * sizeof *t); *fill = 0; }
++    for (u32 i = (u32)(key ^ (key >> 32)) & (LD_VRU_SLOTS - 1);; i = (i + 1) & (LD_VRU_SLOTS - 1)) {
++        if (t[i].key == key) return &t[i];
++        if (!t[i].key) {
++            if (!insert) return NULL;
++            t[i].key = key; (*fill)++;
++            return &t[i];
++        }
++    }
++}
++
++static void ld_vreuse_note(const rsx_vertex_layout_plan* layout, LONGLONG spent)
++{
++    if (!g_vru) {
++        g_vru = (ld_vru_slot*)calloc(LD_VRU_SLOTS, sizeof *g_vru);
++        g_vrc = (ld_vru_slot*)calloc(LD_VRU_SLOTS, sizeof *g_vrc);
++        if (!g_vru || !g_vrc) return;
++    }
++    const u32 frame = g_ld_frames;
++    const u64 nv = dc.n_refs;
++    g_vrs.d++; g_vrs.v += nv; g_vrs.qpc += spent;
++
++    if (dc.inl) { g_vrs.inl_d++; g_vrs.inl_v += nv; }
++    else {
++        const rsx_vertex_fetch_plan* pl = &dc.fetch_plan;
++        u64 k = ld_vr_mix(0x51ED270B27A3C7E5ull, ((u64)layout->mask << 32) | layout->stride);
++        k = ld_vr_mix(k, ((u64)pl->base_offset << 32) | pl->divider_mask);
++        for (u32 s = 0; s < layout->count; s++) {
++            const u32 a = layout->attrs[s];
++            const rsx_vertex_fetch_attr* f = &pl->attr[a];
++            k = ld_vr_mix(k, ((u64)a << 56) ^ ((u64)f->desc.location << 48) ^
++                             ((u64)f->desc.type << 40) ^ ((u64)f->desc.size << 32) ^ f->desc.offset);
++            k = ld_vr_mix(k, ((u64)f->stride << 32) | f->desc.frequency);
++        }
++        rsx_dsp_index_array ia;
++        memset(&ia, 0, sizeof ia);
++        if (dc.n_idx) {
++            rsx_dsp_get_index_array(&g.rsx, &ia);
++            k = ld_vr_mix(k, ((u64)ia.location << 40) ^ ((u64)ia.is_u32 << 32) ^ ia.offset);
++            k = ld_vr_mix(k, ((u64)rsx_dsp_vertex_data_base_index(&g.rsx) << 32) ^
++                             ((u64)rsx_dsp_restart_index_enabled(&g.rsx, ia.is_u32) << 31) ^
++                             rsx_dsp_restart_index(&g.rsx));
++            for (u32 b = 0; b < dc.n_idx; b++)
++                k = ld_vr_mix(k, ((u64)dc.idx[b].first << 32) | dc.idx[b].count);
++        }
++        for (u32 b = 0; b < dc.n_arr; b++)
++            k = ld_vr_mix(k, 0xA5A5000000000000ull ^ ((u64)dc.arr[b].first << 24) ^ dc.arr[b].count);
++        if (!k) k = 1;
++
++        /* Source spans, harvested into the write watch's generation table. */
++        enum { MAXS = RSX_DSP_NUM_VERTEX_ATTR + 8 };
++        const u8* sp[MAXS]; u32 sn[MAXS]; u32 ns = 0;
++        int have_src = ld_ww_enabled();
++        for (u32 s = 0; s < layout->count && have_src; s++) {
++            const rsx_vertex_fetch_attr* f = &pl->attr[layout->attrs[s]];
++            if (!f->desc.type || !f->desc.size) continue;      /* default value: no source */
++            if (!f->stable_base) { have_src = 0; break; }
++            sp[ns] = f->stable_base;
++            sn[ns] = (f->stable_last - f->stable_first) * f->stride + f->elem_size;
++            ns++;
++        }
++        const u32 esz = ia.is_u32 ? 4u : 2u;
++        for (u32 b = 0; b < dc.n_idx && have_src; b++) {
++            const u8* ip = ns < MAXS && dc.idx[b].count
++                ? guest_ptr(ia.location, ia.offset + dc.idx[b].first * esz, dc.idx[b].count * esz) : NULL;
++            if (!ip) { have_src = 0; break; }
++            sp[ns] = ip; sn[ns] = dc.idx[b].count * esz; ns++;
++        }
++        u32 gen = 0;
++        for (u32 i = 0; i < ns && have_src; i++) {
++            const u32 g2 = ld_ww_harvest(sp[i], sn[i]);
++            if (!g2) have_src = 0; else gen = g2;
++        }
++
++        u64 o = ld_vr_bytes(0x2545F4914F6CDD1Dull, dc.compact_verts, (size_t)nv * layout->stride);
++        if (dc.refs_remapped && dc.ref_remap.occurrence_to_unique)
++            o = ld_vr_bytes(o, (const u8*)dc.ref_remap.occurrence_to_unique, (size_t)dc.n_source_refs * 4u);
++        else
++            o = ld_vr_mix(o, dc.n_source_refs);
++        if (!o) o = 1;
++
++        ld_vru_slot* e = ld_vr_find(g_vru, &g_vru_fill, k, 0);
++        const int same_out = e && e->out == o;
++        if (!have_src) {
++            g_vrs.nosrc_d++; g_vrs.nosrc_v += nv;
++            if (same_out) g_vrs.nosrc_same_d++;
++        } else if (e && e->gen) {
++            int clean = 1;
++            for (u32 i = 0; i < ns && clean; i++) clean = ld_ww_clean_since(sp[i], sn[i], e->gen);
++            if (clean) {
++                g_vrs.hit_d++; g_vrs.hit_v += nv;
++                if (e->frame == frame) { g_vrs.intra_d++; g_vrs.intra_v += nv; }
++                if (!same_out) g_vrs.false_hit++;
++            } else {
++                g_vrs.dirty_d++; g_vrs.dirty_v += nv;
++                if (same_out) g_vrs.dirty_same_d++;
++            }
++        } else {
++            g_vrs.new_d++; g_vrs.new_v += nv;
++            const ld_vru_slot* c = ld_vr_find(g_vrc, &g_vrc_fill, o, 0);
++            if (c && c->frame + 1 >= frame) { g_vrs.new_seen_d++; g_vrs.new_seen_v += nv; }
++        }
++        if (!e) e = ld_vr_find(g_vru, &g_vru_fill, k, 1);
++        e->out = o; e->gen = have_src ? gen : 0; e->frame = frame;
++        ld_vr_find(g_vrc, &g_vrc_fill, o, 1)->frame = frame;
++    }
++
++    static LONGLONG t0, qf; static u32 f0;
++    LARGE_INTEGER now; QueryPerformanceCounter(&now);
++    if (!qf) { LARGE_INTEGER q; QueryPerformanceFrequency(&q); qf = q.QuadPart; t0 = now.QuadPart; f0 = frame; }
++    if (now.QuadPart - t0 < qf) return;
++    const double nf = frame > f0 ? (double)(frame - f0) : 1.0;
++    const double D = g_vrs.d ? (double)g_vrs.d : 1.0, V = g_vrs.v ? (double)g_vrs.v : 1.0;
++#define VR_P(a, b) (100.0 * (double)(a) / (b))
++    fprintf(stderr,
++            "[vreuse] frames=%.0f groups/f=%.0f verts/f=%.0f | hit %.0f/%.0f (same frame %.0f/%.0f)"
++            " dirty %.0f/%.0f (same out %.0f) new %.0f/%.0f (out seen %.0f/%.0f)"
++            " nosrc %.0f/%.0f (same out %.0f) inline %.0f/%.0f | false hits %llu | fetch %.2f ms/f\n",
++            nf, D / nf, V / nf,
++            VR_P(g_vrs.hit_d, D), VR_P(g_vrs.hit_v, V), VR_P(g_vrs.intra_d, D), VR_P(g_vrs.intra_v, V),
++            VR_P(g_vrs.dirty_d, D), VR_P(g_vrs.dirty_v, V), VR_P(g_vrs.dirty_same_d, D),
++            VR_P(g_vrs.new_d, D), VR_P(g_vrs.new_v, V), VR_P(g_vrs.new_seen_d, D), VR_P(g_vrs.new_seen_v, V),
++            VR_P(g_vrs.nosrc_d, D), VR_P(g_vrs.nosrc_v, V), VR_P(g_vrs.nosrc_same_d, D),
++            VR_P(g_vrs.inl_d, D), VR_P(g_vrs.inl_v, V), g_vrs.false_hit,
++            (double)g_vrs.qpc * 1000.0 / (double)qf / nf);
++#undef VR_P
++    memset(&g_vrs, 0, sizeof g_vrs);
++    t0 = now.QuadPart; f0 = frame;
++}
++
++/* ---------------------------------------------------------------------------
++ * Persistent vertex cache (on by default; LD_VTX_CACHE=0 = fetch every group
++ * as before; size cap LD_VTX_CACHE_MB, default 1024). Measured at 60 ticks:
++ * the player-entrance scene 42-44 -> 57-61 fps, match mean 57.2 -> 59.4 fps;
++ * 0 differences in ~10,000 safety-net rebuilds. A compact-path group's converted vertices
++ * and final indices are kept and reused, instead of fetching, converting and
++ * re-indexing them again, while nothing they were made from changed:
++ *  - key: primitive, layout, every used attribute's descriptor (location,
++ *    offset, type, size, stride, frequency), divider mask, data base offset,
++ *    the default value of a used attribute with no array, the index array
++ *    (location, offset, width), base index, restart settings and the group's
++ *    array/index batches;
++ *  - sources: the byte ranges of every attribute array the group's indices
++ *    reach, and its index bytes. Each use harvests those ranges into the write
++ *    watch's generation table (GetWriteWatch, exact at that moment) and is a
++ *    miss if any page was written since the entry was made -- by the game, an
++ *    SPU, or this thread's own transfers;
++ *  - the IO map generation (cellGcmMap.., cellGcmUnmap..) when it was made.
++ * Admission on the second sighting: the first only records the key, so data
++ * drawn once (HUD or effects streamed to new addresses) never takes memory.
++ * Keys not seen again within 120 frames, and data unused for 3600 frames,
++ * are dropped; over the cap the least recently used data goes first. Data is
++ * always copied into the frame's upload ring, never referenced by the GPU,
++ * so dropping an entry never races the GPU.
++ * Safety net, as with textures: an entry in use is rebuilt and compared once
++ * every 128 frames (staggered by key); a difference is logged as [vc-miss]
++ * and the entry refreshed. [vcache] prints its counters every 5 s.
++ * -----------------------------------------------------------------------*/
++u32 cellGcm_iomap_generation(void);
++
++#define LD_VC_BUCKETS    (1u << 16)
++#define LD_VC_MAX_RANGES 48u
++typedef struct ld_vc_range { const u8* p; u32 n; } ld_vc_range;
++typedef struct ld_vc_entry {
++    u64 key;
++    struct ld_vc_entry* next;                   /* bucket chain */
++    struct ld_vc_entry *prev_lru, *next_lru;    /* g_vc_keys or g_vc_data, recent first */
++    u32 frame_used, frame_made, ww_gen, iomap_gen;
++    u32 indexed, n_tri, n_upload, vb_bytes, n_ranges;
++    int has_data;
++    ld_vc_range* ranges;
++    u8* verts;
++    u32* idx;
++    size_t bytes;
++} ld_vc_entry;
++typedef struct { ld_vc_entry *head, *tail; } ld_vc_list;
++
++static ld_vc_entry** g_vc_bucket;
++static ld_vc_list g_vc_keys, g_vc_data;
++static size_t g_vc_bytes, g_vc_cap;
++static u32 g_vc_entries, g_vc_lookup_iomap;
++static u32* g_vc_ix; static u32 g_vc_ix_cap;
++static struct {
++    unsigned long long hit, hit_v, miss_new, miss_admit, miss_dirty, miss_map, miss_verify,
++        uncacheable, stores, evicted, verified, vmiss;
++    LONGLONG check_qpc;
++} g_vcs;
++
++static int ld_vc_on(void)
++{
++    static int on = -1;
++    if (on < 0) {
++        const char* e = getenv("LD_VTX_CACHE");
++        on = (e && *e == '0') ? 0 : 1;
++        if (on && (getenv("RSX_A010_GEOM") || !ld_ww_enabled())) on = 0;
++        if (on) {
++            const char* m = getenv("LD_VTX_CACHE_MB");
++            const long mb = m ? strtol(m, NULL, 10) : 1024;
++            g_vc_cap = (size_t)(mb > 0 ? mb : 1024) << 20;
++            g_vc_bucket = (ld_vc_entry**)calloc(LD_VC_BUCKETS, sizeof *g_vc_bucket);
++            if (!g_vc_bucket) on = 0;
++        }
++        fprintf(stderr, "[vcache] vertex cache: %s\n",
++                on ? "on (LD_VTX_CACHE=0 turns it off)"
++                   : "off (LD_VTX_CACHE=0, RSX_A010_GEOM set, or no write watch)");
++    }
++    return on;
++}
++
++static void ld_vc_unlink(ld_vc_list* l, ld_vc_entry* e)
++{
++    if (e->prev_lru) e->prev_lru->next_lru = e->next_lru; else l->head = e->next_lru;
++    if (e->next_lru) e->next_lru->prev_lru = e->prev_lru; else l->tail = e->prev_lru;
++    e->prev_lru = e->next_lru = NULL;
++}
++
++static void ld_vc_push(ld_vc_list* l, ld_vc_entry* e)
++{
++    e->prev_lru = NULL;
++    e->next_lru = l->head;
++    if (l->head) l->head->prev_lru = e; else l->tail = e;
++    l->head = e;
++}
++
++/* A data entry becomes a key-only entry again. */
++static void ld_vc_drop_data(ld_vc_entry* e)
++{
++    if (!e->has_data) return;
++    ld_vc_unlink(&g_vc_data, e);
++    g_vc_bytes -= e->bytes;
++    free(e->verts); free(e->idx); free(e->ranges);
++    e->verts = NULL; e->idx = NULL; e->ranges = NULL;
++    e->bytes = 0; e->n_ranges = 0; e->has_data = 0;
++    ld_vc_push(&g_vc_keys, e);
++}
++
++static void ld_vc_remove(ld_vc_entry* e)
++{
++    ld_vc_drop_data(e);
++    ld_vc_unlink(&g_vc_keys, e);
++    ld_vc_entry** pp = &g_vc_bucket[(u32)(e->key ^ (e->key >> 32)) & (LD_VC_BUCKETS - 1)];
++    while (*pp && *pp != e) pp = &(*pp)->next;
++    if (*pp) *pp = e->next;
++    free(e);
++    g_vc_entries--;
++}
++
++static void ld_vc_age(u32 frame)
++{
++    while (g_vc_keys.tail && frame - g_vc_keys.tail->frame_used > 120u)
++        ld_vc_remove(g_vc_keys.tail);
++    while (g_vc_data.tail &&
++           (frame - g_vc_data.tail->frame_used > 3600u || g_vc_bytes > g_vc_cap)) {
++        ld_vc_remove(g_vc_data.tail);
++        g_vcs.evicted++;
++    }
++}
++
++static void ld_vc_stats(void)
++{
++    static LONGLONG t0, qf; static u32 f0;
++    LARGE_INTEGER now; QueryPerformanceCounter(&now);
++    if (!qf) { LARGE_INTEGER q; QueryPerformanceFrequency(&q); qf = q.QuadPart; t0 = now.QuadPart; f0 = g_ld_frames; }
++    if (now.QuadPart - t0 < 5 * qf) return;
++    const double nf = g_ld_frames > f0 ? (double)(g_ld_frames - f0) : 1.0;
++    const unsigned long long looks = g_vcs.hit + g_vcs.miss_new + g_vcs.miss_admit +
++        g_vcs.miss_dirty + g_vcs.miss_map + g_vcs.miss_verify;
++    fprintf(stderr,
++            "[vcache] last 5 s: hits=%llu (%.1f%%, %.0f verts/frame) misses: new=%llu admit=%llu dirty=%llu "
++            "map=%llu verify=%llu uncacheable=%llu | stored=%llu evicted=%llu verified=%llu vc-miss=%llu | "
++            "%.1f MB, %u keys | lookup %.2f ms/frame\n",
++            g_vcs.hit, looks ? 100.0 * (double)g_vcs.hit / (double)looks : 0.0, (double)g_vcs.hit_v / nf,
++            g_vcs.miss_new, g_vcs.miss_admit, g_vcs.miss_dirty, g_vcs.miss_map, g_vcs.miss_verify,
++            g_vcs.uncacheable, g_vcs.stores, g_vcs.evicted, g_vcs.verified, g_vcs.vmiss,
++            (double)g_vc_bytes / 1048576.0, g_vc_entries,
++            (double)g_vcs.check_qpc * 1000.0 / (double)qf / nf);
++    memset(&g_vcs, 0, sizeof g_vcs);
++    t0 = now.QuadPart; f0 = g_ld_frames;
++}
++
++/* dc.fetch_plan must be initialised for this group (ld_vc_lookup does it). */
++static u64 ld_vc_key(const rsx_vertex_layout_plan* layout, u32 prim, rsx_dsp_index_array* ia)
++{
++    const rsx_vertex_fetch_plan* pl = &dc.fetch_plan;
++    u64 k = ld_vr_mix(0x7C3A6F21D94B85E3ull, ((u64)layout->mask << 32) | layout->stride);
++    k = ld_vr_mix(k, prim);
++    k = ld_vr_mix(k, ((u64)pl->base_offset << 32) | pl->divider_mask);
++    for (u32 s = 0; s < layout->count; s++) {
++        const u32 a = layout->attrs[s];
++        const rsx_vertex_fetch_attr* f = &pl->attr[a];
++        k = ld_vr_mix(k, ((u64)a << 56) ^ ((u64)f->desc.location << 48) ^
++                         ((u64)f->desc.type << 40) ^ ((u64)f->desc.size << 32) ^ f->desc.offset);
++        k = ld_vr_mix(k, ((u64)f->stride << 32) | f->desc.frequency);
++        if (!f->desc.type || !f->desc.size) {   /* converted from its default value */
++            u64 d0, d1;
++            memcpy(&d0, &f->default_value[0], 8);
++            memcpy(&d1, &f->default_value[2], 8);
++            k = ld_vr_mix(ld_vr_mix(k, d0), d1);
++        }
++    }
++    k = ld_vr_mix(k, 0x1D00000000000000ull ^ dc.n_idx);
++    if (dc.n_idx) {
++        rsx_dsp_get_index_array(&g.rsx, ia);
++        k = ld_vr_mix(k, ((u64)ia->location << 40) ^ ((u64)ia->is_u32 << 32) ^ ia->offset);
++        k = ld_vr_mix(k, rsx_dsp_vertex_data_base_index(&g.rsx));
++        k = ld_vr_mix(k, ((u64)(rsx_dsp_restart_index_enabled(&g.rsx, ia->is_u32) != 0) << 32) |
++                         rsx_dsp_restart_index(&g.rsx));
++        for (u32 b = 0; b < dc.n_idx; b++)
++            k = ld_vr_mix(k, ((u64)dc.idx[b].first << 32) | dc.idx[b].count);
++    }
++    k = ld_vr_mix(k, 0xA5A5000000000000ull ^ dc.n_arr);
++    for (u32 b = 0; b < dc.n_arr; b++)
++        k = ld_vr_mix(k, ((u64)dc.arr[b].first << 32) | dc.arr[b].count);
++    return k ? k : 1;
++}
++
++/* Guest byte range [start, end) of `location` as host ranges, split at 1 MB
++ * IO pages (main memory is mapped per IO page, so a range crossing one has no
++ * single host pointer). */
++static int ld_vc_add_guest(ld_vc_range* r, u32* n, u32 location, u64 start, u64 end)
++{
++    if (end > 0x100000000ull) return 0;
++    while (start < end) {
++        if (*n >= LD_VC_MAX_RANGES) return 0;
++        const u64 next = (start | 0xFFFFFull) + 1u;
++        const u32 len = (u32)((end < next ? end : next) - start);
++        const u8* p = guest_ptr(location, (u32)start, len);
++        if (!p) return 0;
++        r[*n].p = p; r[*n].n = len; (*n)++;
++        start += len;
++    }
++    return 1;
++}
++
++/* The group's source ranges after a fetch (dc.refs, dc.fetch_plan), merged by
++ * host address. UINT32_MAX when they cannot all be resolved. */
++static u32 ld_vc_ranges(ld_vc_range* r, const rsx_vertex_layout_plan* layout,
++                        const rsx_dsp_index_array* ia)
++{
++    const rsx_vertex_fetch_plan* pl = &dc.fetch_plan;
++    u32 n = 0;
++    int plain_known = 0;
++    u32 plain_first = UINT32_MAX, plain_last = 0;
++    for (u32 s = 0; s < layout->count; s++) {
++        const u32 a = layout->attrs[s];
++        const rsx_vertex_fetch_attr* f = &pl->attr[a];
++        if (!f->desc.type || !f->desc.size) continue;
++        if (!f->elem_size) return UINT32_MAX;
++        const u32 modulo = (pl->divider_mask >> a) & 1u;
++        u32 first = UINT32_MAX, last = 0;
++        if (rsx_vertex_freq_plain(f->desc.frequency, modulo)) {
++            if (!plain_known) {
++                plain_known = 1;
++                for (u32 i = 0; i < dc.n_refs; i++) {
++                    const u32 el = rsx_vertex_element_index(dc.refs[i].vertex_id, dc.refs[i].base_index, 0, 0);
++                    if (el < plain_first) plain_first = el;
++                    if (el > plain_last) plain_last = el;
++                }
++            }
++            first = plain_first; last = plain_last;
++        } else for (u32 i = 0; i < dc.n_refs; i++) {
++            const u32 el = rsx_vertex_element_index(dc.refs[i].vertex_id, dc.refs[i].base_index,
++                                                    f->desc.frequency, modulo);
++            if (el < first) first = el;
++            if (el > last) last = el;
++        }
++        if (first > last) return UINT32_MAX;
++        const u64 prefix = rsx_dsp_resolve_vertex_offset(pl->base_offset, f->desc.offset);
++        if (!ld_vc_add_guest(r, &n, f->desc.location, prefix + (u64)first * f->stride,
++                             prefix + (u64)last * f->stride + f->elem_size))
++            return UINT32_MAX;
++    }
++    if (dc.n_idx) {
++        const u32 esz = ia->is_u32 ? 4u : 2u;
++        for (u32 b = 0; b < dc.n_idx; b++) {
++            if (!dc.idx[b].count) continue;
++            const u64 s0 = (u64)ia->offset + (u64)dc.idx[b].first * esz;
++            if (!ld_vc_add_guest(r, &n, ia->location, s0, s0 + (u64)dc.idx[b].count * esz))
++                return UINT32_MAX;
++        }
++    }
++    for (u32 i = 1; i < n; i++) {                       /* by host address */
++        const ld_vc_range t = r[i];
++        u32 j = i;
++        while (j && r[j - 1].p > t.p) { r[j] = r[j - 1]; j--; }
++        r[j] = t;
++    }
++    u32 m = 0;
++    for (u32 i = 0; i < n; i++) {
++        if (m && r[i].p <= r[m - 1].p + r[m - 1].n + 4096u) {
++            const u8* end = r[i].p + r[i].n;
++            if (end > r[m - 1].p + r[m - 1].n) r[m - 1].n = (u32)(end - r[m - 1].p);
++        } else
++            r[m++] = r[i];
++    }
++    return m;
++}
++
++/* Returns the entry to draw from, or NULL: then the caller fetches as before
++ * and, when *store is set, hands the result to ld_vc_store. */
++static ld_vc_entry* ld_vc_lookup(const rsx_vertex_layout_plan* layout, u32 prim,
++                                 ld_vc_entry** store, int* verify)
++{
++    LARGE_INTEGER q0, q1;
++    QueryPerformanceCounter(&q0);
++    *store = NULL;
++    *verify = 0;
++    const u32 frame = g_ld_frames;
++    g_vc_lookup_iomap = cellGcm_iomap_generation();
++    rsx_vertex_fetch_plan_init(&dc.fetch_plan, &g.rsx, layout,
++                               (rsx_vertex_guest_ptr_fn)g.guest_ptr, g.guest_user);
++    rsx_dsp_index_array ia;
++    memset(&ia, 0, sizeof ia);
++    const u64 key = ld_vc_key(layout, prim, &ia);
++    ld_vc_age(frame);
++    ld_vc_entry** bucket = &g_vc_bucket[(u32)(key ^ (key >> 32)) & (LD_VC_BUCKETS - 1)];
++    ld_vc_entry* e = *bucket;
++    while (e && e->key != key) e = e->next;
++    ld_vc_entry* hit = NULL;
++    if (!e) {
++        e = (ld_vc_entry*)calloc(1, sizeof *e);
++        if (e) {
++            e->key = key;
++            e->next = *bucket;
++            *bucket = e;
++            e->frame_used = frame;
++            ld_vc_push(&g_vc_keys, e);
++            g_vc_entries++;
++        }
++        g_vcs.miss_new++;
++    } else if (!e->has_data) {
++        ld_vc_unlink(&g_vc_keys, e);
++        e->frame_used = frame;
++        ld_vc_push(&g_vc_keys, e);
++        *store = e;
++        g_vcs.miss_admit++;
++    } else {
++        ld_vc_unlink(&g_vc_data, e);
++        e->frame_used = frame;
++        ld_vc_push(&g_vc_data, e);
++        int ok = e->iomap_gen == g_vc_lookup_iomap;
++        if (!ok) g_vcs.miss_map++;
++        for (u32 i = 0; ok && i < e->n_ranges; i++)
++            if (!ld_ww_harvest(e->ranges[i].p, e->ranges[i].n)) { ok = 0; g_vcs.miss_dirty++; }
++        for (u32 i = 0; ok && i < e->n_ranges; i++)
++            if (!ld_ww_clean_since(e->ranges[i].p, e->ranges[i].n, e->ww_gen)) { ok = 0; g_vcs.miss_dirty++; }
++        if (ok && ((frame + (u32)key) & 127u) == 0 && e->frame_made != frame) {
++            ok = 0;
++            *verify = 1;
++            g_vcs.miss_verify++;
++        }
++        if (ok) {
++            hit = e;
++            g_vcs.hit++;
++            g_vcs.hit_v += e->n_upload;
++        } else
++            *store = e;
++    }
++    QueryPerformanceCounter(&q1);
++    g_vcs.check_qpc += q1.QuadPart - q0.QuadPart;
++    ld_vc_stats();
++    return hit;
++}
++
++/* Index scratch for a group being stored: the upload ring is write-combined
++ * memory, too slow to read back. */
++static u32* ld_vc_ix_reserve(u32 n)
++{
++    if (n > g_vc_ix_cap) {
++        u32 cap = g_vc_ix_cap ? g_vc_ix_cap : 65536u;
++        while (cap < n) cap *= 2u;
++        u32* p = (u32*)realloc(g_vc_ix, (size_t)cap * sizeof(u32));
++        if (!p) return NULL;
++        g_vc_ix = p;
++        g_vc_ix_cap = cap;
++    }
++    return g_vc_ix;
++}
++
++/* After a miss on a known key: keep what was just fetched and indexed (or,
++ * for a scheduled check, compare it with what was kept). */
++static void ld_vc_store(ld_vc_entry* e, int verify, const rsx_vertex_layout_plan* layout,
++                        const void* verts, u32 vb_bytes, int indexed, u32 n_tri,
++                        u32 n_upload, const u32* idx)
++{
++    const u32 frame = g_ld_frames;
++    rsx_dsp_index_array ia;
++    memset(&ia, 0, sizeof ia);
++    if (dc.n_idx) rsx_dsp_get_index_array(&g.rsx, &ia);
++    ld_vc_range r[LD_VC_MAX_RANGES];
++    const u32 nr = ld_vc_ranges(r, layout, &ia);
++    u32 gen = g_ww_gen;
++    int ok = nr != UINT32_MAX;
++    for (u32 i = 0; ok && i < nr; i++) {
++        const u32 g2 = ld_ww_harvest(r[i].p, r[i].n);
++        if (!g2) ok = 0; else gen = g2;
++    }
++    if (!ok) { g_vcs.uncacheable++; ld_vc_drop_data(e); return; }
++    const size_t ib_bytes = indexed ? (size_t)n_tri * sizeof(u32) : 0;
++    if (verify && e->has_data) {
++        g_vcs.verified++;
++        const int same = e->indexed == (u32)indexed && e->n_tri == n_tri &&
++                         e->n_upload == n_upload && e->vb_bytes == vb_bytes &&
++                         (!vb_bytes || !memcmp(e->verts, verts, vb_bytes)) &&
++                         (!ib_bytes || !memcmp(e->idx, idx, ib_bytes));
++        if (same && e->n_ranges == nr && (!nr || !memcmp(e->ranges, r, nr * sizeof *r))) {
++            e->frame_made = frame;
++            e->ww_gen = gen;
++            e->iomap_gen = g_vc_lookup_iomap;
++            return;
++        }
++        if (!same) {
++            g_vcs.vmiss++;
++            static u32 logged;
++            if (logged++ < 32)
++                fprintf(stderr, "[vc-miss] key=%016llX frame=%u verts=%u tri=%u: kept data differed, refreshed\n",
++                        (unsigned long long)e->key, frame, n_upload, n_tri);
++        }
++    }
++    u8* v = vb_bytes ? (u8*)malloc(vb_bytes) : NULL;
++    u32* ix = ib_bytes ? (u32*)malloc(ib_bytes) : NULL;
++    ld_vc_range* rr = nr ? (ld_vc_range*)malloc(nr * sizeof *rr) : NULL;
++    if ((vb_bytes && !v) || (ib_bytes && !ix) || (nr && !rr)) {
++        free(v); free(ix); free(rr);
++        ld_vc_drop_data(e);
++        return;
++    }
++    if (vb_bytes) memcpy(v, verts, vb_bytes);
++    if (ib_bytes) memcpy(ix, idx, ib_bytes);
++    if (nr) memcpy(rr, r, nr * sizeof *rr);
++    ld_vc_drop_data(e);
++    ld_vc_unlink(&g_vc_keys, e);
++    ld_vc_push(&g_vc_data, e);
++    e->has_data = 1;
++    e->verts = v; e->idx = ix; e->ranges = rr; e->n_ranges = nr;
++    e->indexed = (u32)indexed; e->n_tri = n_tri; e->n_upload = n_upload; e->vb_bytes = vb_bytes;
++    e->ww_gen = gen;
++    e->iomap_gen = g_vc_lookup_iomap;
++    e->frame_made = e->frame_used = frame;
++    e->bytes = vb_bytes + ib_bytes + nr * sizeof *rr + sizeof *e;
++    g_vc_bytes += e->bytes;
++    g_vcs.stores++;
++    ld_vc_age(frame);
++}
++
+ static const float* dc_vertex_attr(
+     u32 vertex, u32 attr, float fallback[4])
+ {
+@@ -7757,7 +8347,21 @@
+         g_ld_profile.total_used_attribute_max = used_layout.count;
+     const LONGLONG fetch_pack_begin = ld_profile_qpc();
+ #endif
+-    if (ld_vertex_compact_payload()) {
++    ld_vc_entry* vc = NULL;          /* vertex cache hit: its data replaces the fetch */
++    ld_vc_entry* vc_store = NULL;    /* miss on a known key: keep this group's result */
++    int vc_verify = 0;
++    if (ld_vertex_compact_payload() && !dc.inl && ld_vc_on())
++        vc = ld_vc_lookup(&used_layout, prim, &vc_store, &vc_verify);
++    if (vc) {
++        /* nothing to fetch */
++    } else if (ld_vertex_compact_payload()) {
++        if (ld_vreuse_on()) {   /* census only: see ld_vreuse_note */
++            LARGE_INTEGER q0, q1;
++            QueryPerformanceCounter(&q0);
++            fetch_batches_hoisted(&used_layout, 1);
++            QueryPerformanceCounter(&q1);
++            if (dc.fetch_ok) ld_vreuse_note(&used_layout, q1.QuadPart - q0.QuadPart);
++        } else
+         fetch_batches_hoisted(&used_layout, 1);
+     } else if (ld_vertex_hoist_fetch()) {
+         rsx_vertex_layout_plan legacy_layout;
+@@ -7766,24 +8370,30 @@
+     } else {
+         fetch_batches();
+     }
+-    if (!dc.n_source_refs)
++    if (!vc && !dc.n_source_refs)
+         dc.n_source_refs = dc.n_verts;
+ #if defined(YZ_PERF_PROFILE)
+     g_ld_profile.total.vertex_fetch_pack_qpc +=
+         (u64)(ld_profile_qpc() - fetch_pack_begin);
+ #endif
+-    if (!dc.n_verts || !dc.fetch_ok) { g_ld_stats.group_drop_fetch++; return; }
++    if (!vc && (!dc.n_verts || !dc.fetch_ok)) { g_ld_stats.group_drop_fetch++; return; }
+ 
+     /* Preserve validated occurrence order while allowing repeated compact
+      * vertex references to share one fetched and uploaded payload. */
+     int indexed = 0;
+-    if (!rsx_vertex_topology_plan(prim, dc.refs_remapped, &indexed)) {
+-        g_ld_stats.group_drop_primitive++;
+-        return;
++    u32 n_tri;
++    if (vc) {
++        indexed = (int)vc->indexed;
++        n_tri = vc->n_tri;
++    } else {
++        if (!rsx_vertex_topology_plan(prim, dc.refs_remapped, &indexed)) {
++            g_ld_stats.group_drop_primitive++;
++            return;
++        }
++        n_tri = indexed
++            ? topology_index_count(prim)
++            : dc.n_source_refs - dc.n_source_refs % 3;
+     }
+-    u32 n_tri = indexed
+-        ? topology_index_count(prim)
+-        : dc.n_source_refs - dc.n_source_refs % 3;
+ 
+     if (!n_tri) {
+         g_ld_stats.group_drop_degenerate++;
+@@ -7794,8 +8404,9 @@
+ 
+     const u32 vertex_stride =
+         ld_vertex_compact_payload() ? used_layout.stride : VERT_STRIDE;
+-    const u32 uploaded_vertices = indexed ? dc.n_verts : n_tri;
+-    const void* vertex_data = ld_vertex_compact_payload()
++    const u32 uploaded_vertices = vc ? vc->n_upload : indexed ? dc.n_verts : n_tri;
++    const void* vertex_data = vc ? (const void*)vc->verts
++        : ld_vertex_compact_payload()
+         ? (const void*)dc.compact_verts : (const void*)dc.verts;
+     const u64 draw_vb_bytes = (u64)uploaded_vertices * vertex_stride;
+     const u64 draw_ib_bytes = indexed ? (u64)n_tri * sizeof(u32) : 0;
+@@ -7826,9 +8437,21 @@
+         memcpy(
+             g.vb_mapped + g.vb_used, vertex_data,
+             (size_t)draw_vb_bytes);
+-    if (indexed)
+-        write_topology_indices(
+-            prim, (u32*)((u8*)g.ib_mapped + g.ib_used));
++    const u32* vc_ix = NULL;         /* this group's indices, kept for ld_vc_store */
++    if (indexed) {
++        u32* ib = (u32*)((u8*)g.ib_mapped + g.ib_used);
++        if (vc)
++            memcpy(ib, vc->idx, (size_t)n_tri * sizeof(u32));
++        else if (vc_store && ld_vc_ix_reserve(n_tri)) {
++            write_topology_indices(prim, g_vc_ix);
++            memcpy(ib, g_vc_ix, (size_t)n_tri * sizeof(u32));
++            vc_ix = g_vc_ix;
++        } else
++            write_topology_indices(prim, ib);
++    }
++    if (vc_store && (!indexed || vc_ix))
++        ld_vc_store(vc_store, vc_verify, &used_layout, vertex_data, (u32)draw_vb_bytes,
++                    indexed, n_tri, uploaded_vertices, vc_ix);
+ 
+     ID3D12PipelineState* pso = get_pso(
+         ld_vertex_mask_signature() ? &used_layout : NULL,
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -410,8 +410,14 @@
+  * -----------------------------------------------------------------------*/
+ 
+ /* Populate the offset table entries for an IO mapping */
++/* Bumped by every IO map change; the live renderer's vertex cache keeps the
++ * value its entries were made under and treats a different one as a miss. */
++static volatile u32 s_gcm_iomap_gen = 1;
++u32 cellGcm_iomap_generation(void) { return s_gcm_iomap_gen; }
++
+ static void populate_offset_table(u32 ea, u32 io, u32 size)
+ {
++    s_gcm_iomap_gen++;
+     /*
+      * The offset table uses 1MB pages (20-bit shift).
+      * ioAddress[ea >> 20] = io >> 20   (EA -> IO offset)
+@@ -435,6 +441,7 @@
+ /* Clear offset table entries for an IO mapping */
+ static void clear_offset_table(u32 ea, u32 io, u32 size)
+ {
++    s_gcm_iomap_gen++;
+     u32 pages = size >> 20;
+     u32 ea_page = ea >> 20;
+     u32 io_page = io >> 20;
