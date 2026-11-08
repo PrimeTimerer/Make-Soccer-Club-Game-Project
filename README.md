@@ -38,3 +38,10 @@ This is a native PC port of **サカつく プロサッカークラブをつく�
    - Requires Visual Studio 2022 with clang-cl, Ninja, and Python in `.venv`.
    - The conversion process is recorded in `NOTES.md`.
 3. Run `build_launcher.bat`. It only needs the .NET Framework 4 that comes with Windows.
+
+## License
+
+- The port's own code and files are under the [MIT License](LICENSE). Anyone may use, change and share them, in mods too, as long as the copyright notice stays.
+- `third_party/imgui` (Dear ImGui) and the `ps3recomp` submodule keep their own MIT licenses.
+- `cheats/BLJM61064.txt` is converted from a VitaCheat list for the PS Vita version (`PCSG00198.psv`). The original codes are the work of their authors.
+- The license does not cover the game or anything taken from it; those belong to SEGA. This includes the recompiled lines in `patches/recompiled-*.patch`.
