@@ -1108,3 +1108,34 @@ Owner: "세이브 별로 읽을수 있도록 세이브 파일을 선택 가능�
 - **Checked:**
   - Launcher `--shot` with the running-game source and with slot 1 picked: roster and lists read from the save, all locks off. `launcher.ini` was restored byte for byte after the test.
   - F2 at the office (overlaytest, pad L3+R3): players tab locks unchecked; tabs 치트/선수/목록 only; cheats tab without overlaps (f2d).
+
+## English name search, legend tags (2026-11-08)
+Owner: "선수나 감독 스카우트 목록을 검색할때 영어로도 검색이 가능하도록해줘. 그리고 웹검색을 해서 가상선수들중 레전드 선수들은 괄호 해놓고 구별 가능 하도록."
+- **No alphabet names in the game:**
+  - `txt_static_data.arch` has full names (table 0) and short names (table 1) only.
+  - The only Latin-heavy text file is `text3/ng_word.txb`, the NG word list.
+- **English search:**
+  - Launcher: `tools/launcher/NameSearch.cs`, used by the lists page.
+  - F2 menu: `namesearch` in `saka_overlay.cpp`, used by the lists tab. Results there are cached per search text and country.
+  - Method:
+    - Katakana is romanized (Hepburn; small kana fold into the syllable before; ー and ッ are dropped because doubled letters fold anyway).
+    - The romaji and the typed English are folded to one loose spelling: sch/tch/ch/sh/ph/th/ck/dj/dz/tz/ts/nh, c→k or s, qu/gu before e/i, v→b, l→r, j→z, y→i, no h, doubled letters once.
+    - A name matches when it contains the query within a few edits; a vowel edit costs half because Japanese adds vowels. The allowance is 0 / 1 / 2 / 3 / 4 for 2–3 / 4 / 5–7 / 8–10 / 11+ letters.
+    - Order: a whole word, then a word's start, then inside a word, then across words; then the shorter name.
+  - Results show the romaji: "メッシ [meshi] (3710)".
+  - Checked on the 18,082 players: messi → メッシ, zidane → ジダン, neymar → ネイマール, ronaldo → ロナルド, pele → ペッレ (all first), ancelotti (staff) → アンクロッティ. F2 Europe list with "messi" (capture f2e).
+  - Kanji names (Japanese players, most scouts) have no reading in the game data. They are still found by Japanese text.
+- **Legend tags:**
+  - `cheats/legends.txt` ("player ID<TAB>label", # comments), read by the launcher (`GameText.Players`) and the F2 menu (`loadTexts`). It is data, so no rebuild is needed.
+  - A tagged name reads "名前 (레전드: label)".
+  - Latin letters in a name are kept by the romanizer, so the label's English name is searchable too.
+- **Legend data** (`cheats/legends.txt`, 166 players; built by `make_legends.py` in the session scratchpad from a research subagent's TSV):
+  - 156 come with a source: the fan blog series "サカつく2013日記" (maguron, Ameba, Feb-Mar 2014), whose position rankings from the guidebook data name the real player next to each fictional one.
+    - Foreign stand-ins are at IDs 6886-7401 and 7639-7899, grouped by country or club; Japanese ones at 7402-7638.
+    - Every ID was checked against table 0.
+    - A summarising model extracted the pairs. Only #42, #45 and #52 were read word for word. Five same-name pairs were resolved by their neighbours: インザーラ, コルデバ, アジェラ, カンチェス, パレデス.
+  - 10 are inferred from the name, with no source, under "# 이름으로 추정": Gerd Muller, the Laudrups, the de Boers, Butragueno, Dalglish, Effenberg, Fontaine, Socrates.
+  - Not tagged: 16 stand-ins for players active in 2013, placed in real squads (Gotze, Lahm, Robben, Casillas, Honda, ...).
+  - Searching a legend's real name finds the stand-in first: maradona → ディエゴ・マルドラド, cruyff → グラーフ, zidane → ディザン, kamamoto → 河本 鬼茂. Checked in F2 (capture f2g).
+  - Order ties compare names without the tag; the brackets show the Japanese name's romaji only.
+- Test aids: `SAKA_OVERLAY_SEARCH=<text>` and `SAKA_OVERLAY_LIST=0-2` (F2 lists tab: the first search text and the list shown first).

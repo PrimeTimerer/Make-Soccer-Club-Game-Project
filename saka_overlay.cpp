@@ -205,6 +205,8 @@ std::string dataPath(const char* relative)
     return std::string(bdvd ? bdvd : "game\\dev_bdvd") + "\\PS3_GAME\\USRDIR\\data\\" + relative;
 }
 
+std::vector<std::string> readLines(const char* path);   // below (cheats files); loadTexts reads legends.txt
+
 struct Texts {
     bool loaded = false;
     Names players, nations, staff, scouts;
@@ -232,6 +234,22 @@ void loadTexts()
             g_text.staff = table(9);
             g_text.scouts = table(10);
         }
+    }
+    // Legend tags after the fictional stand-ins for real legends: cheats\legends.txt, "player ID<TAB>label" (as the
+    // launcher's GameText.Players).
+    for (const std::string& line : readLines("cheats\\legends.txt")) {
+        if (line.empty() || line[0] == '#')
+            continue;
+        const size_t tab = line.find('\t');
+        if (tab == std::string::npos)
+            continue;
+        const int id = std::atoi(line.substr(0, tab).c_str());
+        std::string label = line.substr(tab + 1);
+        while (!label.empty() && (label.back() == '\r' || label.back() == ' '))
+            label.pop_back();
+        auto it = g_text.players.find(id);
+        if (it != g_text.players.end() && !label.empty())
+            it->second += " (레전드: " + label + ")";
     }
     std::vector<uint8_t> a = readFile(dataPath("text3\\pledit_ability_name.txb"));
     Names ab = textTable(a, 0);
@@ -723,14 +741,217 @@ void buildPeople(int L, const Names& names, int maxId)
         }
 }
 
+// English search over the game's Japanese names (owner, 2026-11-08: "영어로도 검색이 가능하도록"). The launcher's
+// NameSearch.cs has the same rules and says why: katakana → Hepburn romaji, both sides folded to one loose spelling,
+// a match within a few edits where a vowel edit costs half.
+namespace namesearch {
+const char* const kKata[] = {
+    "a", "a", "i", "i", "u", "u", "e", "e", "o", "o",
+    "ka", "ga", "ki", "gi", "ku", "gu", "ke", "ge", "ko", "go",
+    "sa", "za", "shi", "ji", "su", "zu", "se", "ze", "so", "zo",
+    "ta", "da", "chi", "ji", "", "tsu", "zu", "te", "de", "to", "do",
+    "na", "ni", "nu", "ne", "no",
+    "ha", "ba", "pa", "hi", "bi", "pi", "fu", "bu", "pu", "he", "be", "pe", "ho", "bo", "po",
+    "ma", "mi", "mu", "me", "mo",
+    "ya", "ya", "yu", "yu", "yo", "yo",
+    "ra", "ri", "ru", "re", "ro",
+    "wa", "wa", "wi", "we", "wo", "n", "vu", "ka", "ke",
+};
+bool vowel(char c) { return c == 'a' || c == 'e' || c == 'i' || c == 'o' || c == 'u'; }
+bool endsWith(const std::string& s, const char* e)
+{
+    const size_t n = std::strlen(e);
+    return s.size() >= n && s.compare(s.size() - n, n, e) == 0;
+}
+std::string romaji(const std::string& utf8)
+{
+    std::string o;
+    for (size_t i = 0; i < utf8.size();) {
+        const unsigned char c0 = (unsigned char)utf8[i];
+        uint32_t cp = 0;
+        size_t len = 1;
+        if (c0 < 0x80) cp = c0;
+        else if ((c0 >> 5) == 6 && i + 1 < utf8.size()) { cp = ((c0 & 0x1Fu) << 6) | (utf8[i + 1] & 0x3F); len = 2; }
+        else if ((c0 >> 4) == 14 && i + 2 < utf8.size()) { cp = ((c0 & 0x0Fu) << 12) | ((utf8[i + 1] & 0x3Fu) << 6) | (utf8[i + 2] & 0x3F); len = 3; }
+        else if ((c0 >> 3) == 30) len = 4;
+        i += len;
+        if (cp >= 0x3041 && cp <= 0x3096)
+            cp += 0x60;   // hiragana → katakana
+        if ((cp >= 'a' && cp <= 'z') || (cp >= 'A' && cp <= 'Z')) {
+            o += (char)std::tolower((int)cp);   // Latin letters (a legend tag's real name) as they are
+            continue;
+        }
+        if (cp == 0x30FC || cp == 0x30C3)
+            continue;     // ー and ッ: doubled letters fold away anyway
+        if (cp < 0x30A1 || cp > 0x30F6) {
+            if (!o.empty() && o.back() != ' ')
+                o += ' ';
+            continue;
+        }
+        const std::string r = kKata[cp - 0x30A1];
+        const bool smallVowel = cp == 0x30A1 || cp == 0x30A3 || cp == 0x30A5 || cp == 0x30A7 || cp == 0x30A9;
+        const bool smallY = cp == 0x30E3 || cp == 0x30E5 || cp == 0x30E7;
+        const size_t n = o.size();
+        if (smallVowel && n > 0) {
+            if (o[n - 1] == 'u' && (n == 1 || o[n - 2] == ' '))
+                o[n - 1] = 'w';
+            else if (vowel(o[n - 1]))
+                o.pop_back();
+            o += r;
+        } else if (smallY && n > 0) {
+            if (endsWith(o, "shi") || endsWith(o, "chi") || endsWith(o, "ji")) {
+                o.pop_back();
+                o += r.substr(1);
+            } else if (vowel(o[n - 1])) {
+                o.pop_back();
+                o += r;
+            } else
+                o += r;
+        } else
+            o += r;
+    }
+    const size_t a = o.find_first_not_of(' '), b = o.find_last_not_of(' ');
+    return a == std::string::npos ? std::string() : o.substr(a, b - a + 1);
+}
+void replaceAll(std::string& s, const char* from, const char* to)
+{
+    const size_t fl = std::strlen(from), tl = std::strlen(to);
+    for (size_t p = s.find(from); p != std::string::npos; p = s.find(from, p + tl))
+        s.replace(p, fl, to);
+}
+std::string key(const std::string& text)
+{
+    std::string t;
+    for (char ch : text) {
+        const char c = (char)std::tolower((unsigned char)ch);
+        if (c >= 'a' && c <= 'z')
+            t += c;
+    }
+    const char* pairs[][2] = {{"sch", "s"}, {"tch", "C"}, {"ch", "C"}, {"sh", "s"}, {"ph", "f"}, {"th", "s"}, {"ck", "k"},
+                              {"dj", "z"}, {"dz", "z"}, {"tz", "s"}, {"ts", "s"}, {"nh", "n"}};
+    for (const auto& p : pairs)
+        replaceAll(t, p[0], p[1]);
+    std::string k;
+    for (size_t i = 0; i < t.size(); i++) {
+        const char c = t[i], next = i + 1 < t.size() ? t[i + 1] : ' ', after = i + 2 < t.size() ? t[i + 2] : ' ';
+        if ((c == 'q' || c == 'g') && next == 'u' && (after == 'e' || after == 'i')) {
+            k += c == 'q' ? 'k' : 'g';
+            i++;
+            continue;
+        }
+        switch (c) {
+        case 'c': k += (next == 'e' || next == 'i' || next == 'y') ? 's' : 'k'; break;
+        case 'C': k += 'c'; break;
+        case 'q': k += 'k'; break;
+        case 'x': k += "ks"; break;
+        case 'v': k += 'b'; break;
+        case 'l': k += 'r'; break;
+        case 'j': k += 'z'; break;
+        case 'y': k += 'i'; break;
+        case 'h': break;
+        default: k += c; break;
+        }
+    }
+    std::string o;
+    for (char c : k)
+        if (o.empty() || o.back() != c)
+            o += c;
+    return o;
+}
+int distance(const std::string& q, const std::string& t)
+{
+    const size_t m = q.size(), n = t.size();
+    std::vector<int> prev(n + 1, 0), cur(n + 1, 0);
+    for (size_t i = 1; i <= m; i++) {
+        const int qc = vowel(q[i - 1]) ? 1 : 2;
+        cur[0] = prev[0] + qc;
+        for (size_t j = 1; j <= n; j++) {
+            const int tc = vowel(t[j - 1]) ? 1 : 2;
+            const int sub = q[i - 1] == t[j - 1] ? 0 : std::max(qc, tc);
+            cur[j] = std::min(std::min(prev[j] + qc, cur[j - 1] + tc), prev[j - 1] + sub);
+        }
+        std::swap(prev, cur);
+    }
+    return *std::min_element(prev.begin(), prev.end());
+}
+bool isEnglish(const std::string& s)
+{
+    bool letter = false;
+    for (char ch : s) {
+        if ((unsigned char)ch > 127)
+            return false;
+        letter |= std::isalpha((unsigned char)ch) != 0;
+    }
+    return letter;
+}
+// [0] the whole name's spelling, then each word's.
+const std::vector<std::string>& nameKeys(const std::string& name)
+{
+    static std::map<std::string, std::vector<std::string>> cache;
+    auto it = cache.find(name);
+    if (it == cache.end()) {
+        const std::string r = romaji(name);
+        std::vector<std::string> k{key(r)};
+        std::istringstream words(r);
+        for (std::string w; words >> w;)
+            k.push_back(key(w));
+        it = cache.emplace(name, std::move(k)).first;
+    }
+    return it->second;
+}
+// -1 = no match, else an order (lower first): a whole word 0, a word's start 1, inside a word 2 + 4 per edit cost,
+// across words 4 + 4 per edit cost (as NameSearch.cs).
+int score(const std::string& name, const std::string& query)
+{
+    const std::string q = key(query);
+    if (q.size() < 2)
+        return -1;
+    const std::vector<std::string>& k = nameKeys(name);
+    if (k[0].empty())
+        return -1;
+    const int tolerance = q.size() <= 3 ? 0 : q.size() <= 4 ? 1 : q.size() <= 7 ? 2 : q.size() <= 10 ? 3 : 4;
+    int best = -1;
+    for (size_t w = 1; w < k.size(); w++) {
+        int order;
+        if (k[w] == q)
+            order = 0;
+        else if (k[w].compare(0, q.size(), q) == 0)
+            order = 1;
+        else {
+            const int d = distance(q, k[w]);
+            if (d > tolerance)
+                continue;
+            order = 2 + 4 * d;
+        }
+        if (best < 0 || order < best)
+            best = order;
+    }
+    if (best < 0) {
+        const int d = distance(q, k[0]);
+        if (d <= tolerance)
+            best = 4 + 4 * d;
+    }
+    return best;
+}
+}   // namespace namesearch
+
 void listsPanel()
 {
     loadTexts();
+    // SAKA_OVERLAY_SEARCH=<text> / SAKA_OVERLAY_LIST=0-2 (tests): the search boxes' first text and the list shown first.
+    static int testList = -2;
+    if (testList == -2) {
+        if (const char* s = std::getenv("SAKA_OVERLAY_SEARCH"))
+            for (auto& box : g_listSearch)
+                std::snprintf(box, sizeof box, "%s", s);
+        const char* l = std::getenv("SAKA_OVERLAY_LIST");
+        testList = l ? std::atoi(l) : -1;
+    }
     std::vector<ListEdit> edits = loadListEdits();
     if (ImGui::BeginTabBar("lists")) {
         for (int L = 0; L < 3; L++) {
             const ListDef& d = kLists[L];
-            if (!ImGui::BeginTabItem(d.title))
+            if (!ImGui::BeginTabItem(d.title, nullptr, testList == L ? ImGuiTabItemFlags_SetSelected : 0))
                 continue;
             const Names& names = L == 0 ? g_text.staff : L == 1 ? g_text.scouts : g_text.players;
             buildPeople(L, names, d.maxId);
@@ -774,26 +995,59 @@ void listsPanel()
             }
             ImGui::SameLine();
             ImGui::SetNextItemWidth(260);
-            ImGui::InputTextWithHint("##search", "이름 또는 ID", g_listSearch[L], sizeof g_listSearch[L]);
+            ImGui::InputTextWithHint("##search", "이름, 영어 이름 또는 ID", g_listSearch[L], sizeof g_listSearch[L]);
             const std::string search = g_listSearch[L];
             ImGui::TextDisabled("고른 이름이 왼쪽에서 고른 %d번 칸에 들어갑니다.", g_listSlot[L] + 1);
             if (ImGui::BeginListBox("##names", ImVec2(-1, -1))) {
+                // The people shown, worked out again only when the search or the country changes: an English search
+                // (romaji) scores every name, the closest first; Japanese text or an ID matches as before.
+                const bool english = namesearch::isEnglish(search);
+                static std::string hitsFor[3];
+                static std::vector<std::pair<int, int>> hits[3];   // (score, index into g_people[L])
+                const std::string hitsKey = search + "\x1f" + std::to_string(g_listNation[L]);
+                if (hitsFor[L] != hitsKey) {
+                    hitsFor[L] = hitsKey;
+                    hits[L].clear();
+                    for (size_t p = 0; p < g_people[L].size(); p++) {
+                        const auto& pn = g_people[L][p];
+                        const auto kvIt = names.find(pn.first);
+                        if (kvIt == names.end() || (g_listNation[L] >= 0 && pn.second != g_listNation[L]))
+                            continue;
+                        int sc = 0;
+                        if (!search.empty()) {
+                            sc = english ? namesearch::score(kvIt->second, search)
+                                         : (kvIt->second.find(search) != std::string::npos || std::to_string(kvIt->first) == search ? 0 : -1);
+                            if (sc < 0)
+                                continue;
+                        } else if (g_listNation[L] < 0 && d.maxId > 900)
+                            break;   // 18,082 players: pick a country or search first
+                        hits[L].push_back({sc, (int)p});
+                    }
+                    if (english)   // the closest first, then the shorter name
+                        std::stable_sort(hits[L].begin(), hits[L].end(), [&](const std::pair<int, int>& a, const std::pair<int, int>& b) {
+                            if (a.first != b.first)
+                                return a.first < b.first;
+                            auto base = [&](int person) {   // without the legend tag
+                                const std::string& s = names.at(person);
+                                const size_t tag = s.find(" (레전드");
+                                return tag == std::string::npos ? s.size() : tag;
+                            };
+                            return base(g_people[L][a.second].first) < base(g_people[L][b.second].first);
+                        });
+                }
                 int shown = 0;
-                for (const auto& pn : g_people[L]) {
+                for (const auto& hit : hits[L]) {
+                    const auto& pn = g_people[L][hit.second];
                     const auto kvIt = names.find(pn.first);
                     if (kvIt == names.end())
                         continue;
                     const auto& kv = *kvIt;
                     const int n = pn.second;
-                    if (g_listNation[L] >= 0 && n != g_listNation[L])
-                        continue;
-                    if (!search.empty() && kv.second.find(search) == std::string::npos && std::to_string(kv.first) != search)
-                        continue;
-                    if (search.empty() && g_listNation[L] < 0 && d.maxId > 900)
-                        break;   // 18,082 players: pick a country or search first
                     if (++shown > 400)
                         break;
-                    const std::string item = kv.second + "  (" + std::to_string(kv.first) + ")  · " + nameOf(g_text.nations, n);
+                    const size_t tag = kv.second.find(" (레전드");   // the brackets: the Japanese name's romaji only
+                    const std::string item = kv.second + (english ? "  [" + namesearch::romaji(kv.second.substr(0, tag)) + "]" : std::string()) +
+                                             "  (" + std::to_string(kv.first) + ")  · " + nameOf(g_text.nations, n);
                     if (ImGui::Selectable(item.c_str())) {
                         edits.erase(std::remove_if(edits.begin(), edits.end(), [&](const ListEdit& e) { return e.list == d.list && e.slot == g_listSlot[L]; }), edits.end());
                         edits.push_back({d.list, g_listSlot[L], (uint32_t)kv.first, g_listLock[L]});
@@ -809,6 +1063,7 @@ void listsPanel()
             ImGui::EndTabItem();
         }
         ImGui::EndTabBar();
+        testList = -1;
     }
 }
 

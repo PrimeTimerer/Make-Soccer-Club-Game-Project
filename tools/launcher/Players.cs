@@ -416,6 +416,13 @@ namespace SakatsukuLauncher
 
     public class ListsPage : PageBase
     {
+        // A name's length without its legend tag (GameText.Players), for the search order.
+        static int BaseLength(string name)
+        {
+            int tag = name.IndexOf(" (레전드", StringComparison.Ordinal);
+            return tag >= 0 ? tag : name.Length;
+        }
+
         public ListsPage(MainWindow window) : base(window)
         {
         }
@@ -435,17 +442,32 @@ namespace SakatsukuLauncher
                 int n;
                 return GameText.Name(names, id) + "  (" + id + ")" + (nationOf.TryGetValue(id, out n) ? "  · " + GameText.Name(nations, n) : "");
             };
+            Func<int, string> labelRomaji = delegate(int id)   // the romaji the English search matched, after the name
+            {
+                int n;
+                string shown = GameText.Name(names, id);
+                int tag = shown.IndexOf(" (레전드", StringComparison.Ordinal);   // the Japanese name only
+                string romaji = NameSearch.Romaji(tag >= 0 ? shown.Substring(0, tag) : shown);
+                return GameText.Name(names, id) + (romaji.Length > 0 ? "  [" + romaji + "]" : "") + "  (" + id + ")" +
+                       (nationOf.TryGetValue(id, out n) ? "  · " + GameText.Name(nations, n) : "");
+            };
             // A picker lists up to 400 names of the chosen country containing the search text (with neither: all names
             // of the short lists; for the 18,082 players only the chosen one).
             Action<ComboBox, string, uint> fillPicker = delegate(ComboBox pick, string search, uint keep)
             {
                 pick.Items.Clear();
-                IEnumerable<int> shown = ids.Where(i => (search.Length == 0 || names[i].IndexOf(search, StringComparison.CurrentCultureIgnoreCase) >= 0 || i.ToString() == search)
-                                                        && (nation < 0 || (nationOf.ContainsKey(i) && nationOf[i] == nation)));
+                // English (romaji) search: every name scored, the closest first (NameSearch.cs); Japanese text or an ID
+                // matches as before.
+                bool english = NameSearch.IsEnglish(search);
+                IEnumerable<int> inNation = ids.Where(i => nation < 0 || (nationOf.ContainsKey(i) && nationOf[i] == nation));
+                IEnumerable<int> shown = search.Length == 0 ? inNation
+                    : english ? inNation.Select(i => new KeyValuePair<int, int>(i, NameSearch.Score(names[i], search))).Where(p => p.Value >= 0)
+                                        .OrderBy(p => p.Value).ThenBy(p => BaseLength(names[p.Key])).ThenBy(p => p.Key).Select(p => p.Key)
+                    : inNation.Where(i => names[i].IndexOf(search, StringComparison.CurrentCultureIgnoreCase) >= 0 || i.ToString() == search);
                 if (search.Length == 0 && nation < 0 && ids.Count > 900)
                     shown = new int[0];
                 foreach (int id in shown.Take(400))
-                    pick.Items.Add(label(id));
+                    pick.Items.Add(english ? labelRomaji(id) : label(id));
                 if (keep != 0)
                 {
                     string item = label((int)keep);
@@ -530,7 +552,7 @@ namespace SakatsukuLauncher
                 nation = countryBox.SelectedIndex <= 0 ? -1 : countries[countryBox.SelectedIndex - 1].Key;
                 refill();
             };
-            var searchRow = Ui.Row(Ui.Text("이름 검색  ", "Caption"), searchBox, countryBox);
+            var searchRow = Ui.Row(Ui.Text("이름 검색 (일본어·영어)  ", "Caption"), searchBox, countryBox);
             searchRow.Margin = new Thickness(0, 0, 0, 8);
             panel.Children.Insert(0, searchRow);
             return Ui.Card(title, panel, Ui.Text(note, "Caption"));

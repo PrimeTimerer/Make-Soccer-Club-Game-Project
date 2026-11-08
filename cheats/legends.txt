@@ -1,0 +1,170 @@
+# 레전드 선수 표시: 선수 ID<TAB>괄호 안에 붙일 이름 (런처 선수·목록 페이지와 F2 메뉴가 "이름 (레전드: ...)"로 보여 줌).
+# 출처: 팬 블로그 "サカつく2013日記" (maguron, Ameba, 2014-02~03)의 포지션별 랭킹 글에 적힌 실제 선수 이름.
+# 끝의 '# 이름으로 추정' 아래는 출처 없이 이름만 보고 넣은 레전드. 잘못된 줄은 지우거나 고치면 다음 실행부터 반영.
+6886	에르난 크레스포, Hernan Crespo
+6893	파비앵 바르테즈, Fabien Barthez
+6903	조지 웨아, George Weah
+6904	프랑크 레이카르트, Frank Rijkaard
+6905	마르셀 드사이, Marcel Desailly
+6912	파올로 말디니, Paolo Maldini
+6913	잔루카 잠브로타, Gianluca Zambrotta
+6915	필리포 인자기, Filippo Inzaghi
+6923	호나우두, Ronaldo (Nazario)
+6933	후안 파블로 소린, Juan Pablo Sorin
+6934	로베르토 아얄라, Roberto Ayala
+6940	앙헬 라브루나, Angel Labruna
+6950	요제프 마소푸스트, Josef Masopust
+6958	아베디 펠레, Abedi Pele
+6963	헨리크 라르손, Henrik Larsson
+6964	비셴테 리자라쥐, Bixente Lizarazu
+6976	파비오 칸나바로, Fabio Cannavaro
+6981	사미 히피아, Sami Hyypia
+6984	해리 큐얼, Harry Kewell
+6987	호베르투 카를루스, Roberto Carlos
+6993	마우루 시우바, Mauro Silva
+7007	파트리크 비에이라, Patrick Vieira
+7009	게리 네빌, Gary Neville
+7013	야프 스탐, Jaap Stam
+7015	안드리 셰브첸코, Andriy Shevchenko
+7052	지오바니 반 브롱크호르스트, Giovanni van Bronckhorst
+7063	팻 제닝스, Pat Jennings
+7074	앨런 핸슨, Alan Hansen
+7239	앨런 시어러, Alan Shearer
+7240	솔 캠벨, Sol Campbell
+7249	클로드 마켈렐레, Claude Makelele
+7252	호마리우, Romario
+7255	졸탄 치보르, Zoltan Czibor
+7257	루이스 엔리케, Luis Enrique
+7259	안도니 수비사레타, Andoni Zubizarreta
+7262	필립 코쿠, Phillip Cocu
+7277	만프레트 칼츠, Manfred Kaltz
+7284	뤼트 반 니스텔로이, Ruud van Nistelrooy
+7291	에드가 다비즈, Edgar Davids
+7292	릴리앙 튀랑, Lilian Thuram
+7296	파벨 네드베드, Pavel Nedved
+7300	로베르 피레스, Robert Pires
+7305	줄러 그로시치, Gyula Grosics
+7309	미첼 살가도, Michel Salgado
+7319	마리위스 트레조르, Marius Tresor
+7326	지네딘 지단, Zinedine Zidane
+7327	우고 산체스, Hugo Sanchez
+7328	페르난도 레돈도, Fernando Redondo
+7335	조지 베스트, George Best
+7348	에드윈 반 데 사르, Edwin van der Sar
+7355	이반 코르도바, Ivan Cordoba
+7356	마르코 마테라치, Marco Materazzi
+7357	루이스 피구, Luis Figo
+7360	후안 세바스티안 베론, Juan Sebastian Veron
+7367	레네 이기타, Rene Higuita
+7409	아키타 유타카, Yutaka Akita
+7410	후쿠니시 다카시, Takashi Fukunishi
+7431	모리시마 히로아키, Hiroaki Morishima
+7447	소마 나오키, Naoki Soma
+7472	가마모토 구니시게, Kunishige Kamamoto
+7473	나카타 히데토시, Hidetoshi Nakata
+7474	스기야마 류이치, Ryuichi Sugiyama
+7476	오쿠데라 야스히코, Yasuhiko Okudera
+7496	라모스 루이, Ruy Ramos
+7497	하라 히로미, Hiromi Hara
+7498	가네다 노부토시, Nobutoshi Kaneda
+7500	하시라타니 데쓰지, Tetsuji Hashiratani
+7501	이하라 마사미, Masami Ihara
+7520	아데미르 산토스, Ademir Santos
+7540	기무라 가즈시, Kazushi Kimura
+7541	나나미 히로시, Hiroshi Nanami
+7548	하나카다 마사시, Masashi Hanakada
+7558	마쓰키 야스타로, Yasutaro Matsuki
+7562	마에조노 마사키요, Masakiyo Maezono
+7602	쓰나미 사토시, Satoshi Tsunami
+7646	로이 킨, Roy Keane
+7647	알프레도 디 스테파노, Alfredo Di Stefano
+7648	디에고 마라도나, Diego Maradona
+7649	오마르 시보리, Omar Sivori
+7653	다니엘 파사렐라, Daniel Passarella
+7655	오스카르 루헤리, Oscar Ruggeri
+7663	프랑코 바레시, Franco Baresi
+7666	디노 조프, Dino Zoff
+7667	루이지 리바, Luigi Riva
+7668	자친토 파케티, Giacinto Facchetti
+7669	가에타노 시레아, Gaetano Scirea
+7672	알도 올리비에리, Aldo Olivieri
+7676	클라우디오 젠틸레, Claudio Gentile
+7685	바비 찰턴, Bobby Charlton
+7686	스탠리 매슈스, Stanley Matthews
+7687	바비 무어, Bobby Moore
+7688	케빈 키건, Kevin Keegan
+7689	고든 뱅크스, Gordon Banks
+7690	덩컨 에드워즈, Duncan Edwards
+7693	폴 개스코인, Paul Gascoigne
+7694	피터 실턴, Peter Shilton
+7696	크리스 워들, Chris Waddle
+7697	톰 피니, Tom Finney
+7699	빌리 라이트, Billy Wright
+7701	데이비드 시먼, David Seaman
+7702	잭 찰턴, Jack Charlton
+7710	올레크 블로힌, Oleg Blokhin
+7714	루이스 쿠비야, Luis Cubilla
+7716	마티아스 진델라르, Matthias Sindelar
+7720	마르코 반 바스텐, Marco van Basten
+7721	요한 크루이프, Johan Cruyff
+7724	로날드 쿠만, Ronald Koeman
+7725	요한 네스켄스, Johan Neeskens
+7727	빔 판하네험, Wim van Hanegem
+7728	뤼트 크롤, Ruud Krol
+7748	빌리 브렘너, Billy Bremner
+7750	리카르도 사모라, Ricardo Zamora
+7751	루이스 수아레스 미라몬테스, Luis Suarez Miramontes
+7753	페르난도 이에로, Fernando Hierro
+7759	엘리아스 피게로아, Elias Figueroa
+7761	알란 시몬센, Allan Simonsen
+7762	프레벤 엘키에르 라르센, Preben Elkjaer Larsen
+7763	피터 슈마이켈, Peter Schmeichel
+7765	모르텐 올센, Morten Olsen
+7767	프란츠 베켄바워, Franz Beckenbauer
+7768	귄터 네처, Gunter Netzer
+7769	카를하인츠 루메니게, Karl-Heinz Rummenigge
+7770	로타어 마테우스, Lothar Matthaus
+7771	마티아스 잠머, Matthias Sammer
+7775	파울 브라이트너, Paul Breitner
+7777	안드레아스 브레메, Andreas Brehme
+7780	피에르 리트바르스키, Pierre Littbarski
+7782	베르티 포크츠, Berti Vogts
+7783	제프 마이어, Sepp Maier
+7784	카를하인츠 슈넬링거, Karl-Heinz Schnellinger
+7785	하랄트 슈마허, Harald Schumacher
+7787	카를하인츠 푀르스터, Karl-Heinz Forster
+7790	올리버 칸, Oliver Kahn
+7791	미하엘 발락, Michael Ballack
+7806	호세 루이스 칠라베르트, Jose Luis Chilavert
+7809	펠레, Pele
+7810	파울루 호베르투 팔카우, Paulo Roberto Falcao
+7811	가린샤, Garrincha
+7814	토니뉴 세레주, Toninho Cerezo
+7817	히벨리누, Rivellino
+7818	니우통 산투스, Nilton Santos
+7820	둥가, Dunga
+7825	카를루스 아우베르투, Carlos Alberto Torres
+7826	주니오르, Junior (Leovegildo Junior)
+7827	루이스 카를로스 페레이라, Luiz Carlos Pereira (ex-Verdy Kawasaki)
+7841	미셸 플라티니, Michel Platini
+7842	장피에르 파팽, Jean-Pierre Papin
+7843	레몽 코파, Raymond Kopa
+7845	장 티가나, Jean Tigana
+7848	알랭 지레스, Alain Giresse
+7849	마뉘엘 아모로스, Manuel Amoros
+7850	로랑 블랑, Laurent Blanc
+7851	흐리스토 스토이치코프, Hristo Stoichkov
+7859	얀 토마셰프스키, Jan Tomaszewski
+7862	에우제비우, Eusebio
+7870	레프 야신, Lev Yashin
+# 이름으로 추정
+7730	프랑크 더부르, Frank de Boer
+7732	로날드 더부르, Ronald de Boer
+7749	케니 달글리시, Kenny Dalglish
+7752	에밀리오 부트라게뇨, Emilio Butragueno
+7764	미카엘 라우드루프, Michael Laudrup
+7766	브라이언 라우드루프, Brian Laudrup
+7772	게르트 뮐러, Gerd Muller
+7778	슈테판 에펜베르크, Stefan Effenberg
+7813	소크라테스, Socrates
+7846	쥐스트 퐁텐, Just Fontaine

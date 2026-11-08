@@ -82,7 +82,48 @@ namespace SakatsukuLauncher
         }
 
         public static Dictionary<int, string> Nations(Launcher launcher) { return Static(launcher, 2); }
-        public static Dictionary<int, string> Players(Launcher launcher) { return Static(launcher, 0); }
+        // Player names, with a tag after the fictional stand-ins for real legends (owner, 2026-11-08: "가상선수들중
+        // 레전드 선수들은 괄호 해놓고 구별"): cheats\legends.txt, "player ID<TAB>label" per line, # comments.
+        // "名前 (레전드: label)"; the label's English name is searchable too (NameSearch reads Latin letters).
+        static Dictionary<int, string> players;
+
+        public static Dictionary<int, string> Players(Launcher launcher)
+        {
+            if (players == null)
+            {
+                players = new Dictionary<int, string>(Static(launcher, 0));
+                foreach (KeyValuePair<int, string> legend in Legends(launcher))
+                {
+                    string name;
+                    if (players.TryGetValue(legend.Key, out name))
+                        players[legend.Key] = name + " (레전드: " + legend.Value + ")";
+                }
+            }
+            return players;
+        }
+
+        public static Dictionary<int, string> Legends(Launcher launcher)
+        {
+            var legends = new Dictionary<int, string>();
+            try
+            {
+                string path = Path.Combine(Cheats.Dir(launcher), "legends.txt");
+                if (File.Exists(path))
+                    foreach (string line in File.ReadAllLines(path, Encoding.UTF8))
+                    {
+                        if (line.StartsWith("#"))
+                            continue;
+                        string[] f = line.Split('\t');
+                        int id;
+                        if (f.Length >= 2 && int.TryParse(f[0].Trim(), out id) && f[1].Trim().Length > 0)
+                            legends[id] = f[1].Trim();
+                    }
+            }
+            catch (Exception)
+            {
+            }
+            return legends;
+        }
         public static Dictionary<int, string> Clubs(Launcher launcher) { return Static(launcher, 4); }
         public static Dictionary<int, string> Staff(Launcher launcher) { return Static(launcher, 9); }
         public static Dictionary<int, string> Scouts(Launcher launcher) { return Static(launcher, 10); }
