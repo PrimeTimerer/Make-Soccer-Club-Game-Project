@@ -31,17 +31,22 @@ This is a native PC port of **サカつく プロサッカークラブをつく�
 | `tools/launcher/` | The launcher (C#/WPF, .NET Framework 4) |
 | `NOTES.md` | The full record of how the port was made and what was analyzed |
 
+## Download
+
+Ready-to-run builds are on the [Releases](https://github.com/PrimeTimerer/Make-Soccer-Club-Game-Project/releases) page: `Sakatsuku Launcher.exe` and `build-release\SakatsukuRecomp.exe` in one zip. Unzip it, put the files from your own disc in `game\` (see `읽어주세요.txt` in the zip), and run `Sakatsuku Launcher.exe`. The zip contains no game data.
+
 ## Build (Windows)
 
 1. Run `git clone --recursive`, then apply the `patches/0001`, `0002`, … patches to `ps3recomp` in order.
-2. Build `recompiled/`, `prx_src/` and `spu_jobs/` from your own game files, then run `build_release.bat`.
+2. Build `recompiled/`, `prx_src/` and `spu_jobs/` from your own game files, then configure and build `build-release/` with CMake (Release, Ninja, clang-cl). `PORT_SPU_INPUTS` lists `game/EBOOT.ELF`, `game/firmware/libsre.prx`, `game/firmware/libspurs_jq.prx` and the `spu_jobs/cri_*.elf` files.
    - Requires Visual Studio 2022 with clang-cl, Ninja, and Python in `.venv`.
    - The conversion process is recorded in `NOTES.md`.
-3. Run `build_launcher.bat`. It only needs the .NET Framework 4 that comes with Windows.
+3. Build `Sakatsuku Launcher.exe` from `tools/launcher/*.cs` with the C# compiler of the .NET Framework 4 that comes with Windows (`csc.exe /target:winexe`, WPF, `Theme.xaml` as a resource, `icon.ico` as the icon).
+4. `tools/make_release.ps1` makes the release zip.
 
 ## License
 
 - The port's own code and files are under the [MIT License](LICENSE). Anyone may use, change and share them, in mods too, as long as the copyright notice stays.
 - `third_party/imgui` (Dear ImGui) and the `ps3recomp` submodule keep their own MIT licenses.
 - `cheats/BLJM61064.txt` is converted from a VitaCheat list for the PS Vita version (`PCSG00198.psv`). The original codes are the work of their authors.
-- The license does not cover the game or anything taken from it; those belong to SEGA. This includes the recompiled lines in `patches/recompiled-*.patch`.
+- The license does not cover the game or anything taken from it; those belong to SEGA. This includes the recompiled lines in `patches/recompiled-*.patch` and the recompiled game code inside the release exe.

@@ -1,0 +1,28 @@
+diff --git a/recompiled/ppu_recomp_015.cpp b/recompiled/ppu_recomp_015.cpp
+--- a/recompiled/ppu_recomp_015.cpp
++++ b/recompiled/ppu_recomp_015.cpp
+@@ -95428,6 +95428,8 @@
+         return;
+ }
+ 
++extern "C" void saka_cards_entry_hook(ppu_context* ctx);   /* saka_hooks.c cheats (2026-11-09) */
++extern "C" void saka_cards_hook(ppu_context* ctx);
+ void func_00572524(ppu_context* ctx) {
+     PPU_MM_SNAP
+         uint64_t _cs_28 = ctx->gpr[28];
+@@ -95435,6 +95437,7 @@
+         uint64_t _cs_30 = ctx->gpr[30];
+         uint64_t _cs_31 = ctx->gpr[31];
+         vm_write64(ctx->gpr[1] + -0x90, ctx->gpr[1]); ctx->gpr[1] += -0x90;
++        saka_cards_entry_hook(ctx);   /* cheat: is r4 the user's club */
+         ctx->gpr[0] = ctx->lr;
+         vm_write64(ctx->gpr[1] + 0xA0, ctx->gpr[0]);
+         vm_write64(ctx->gpr[1] + 0x80, ctx->gpr[30]);
+@@ -95665,6 +95668,7 @@
+         ctx->gpr[3] = (int64_t)(int32_t)((uint32_t)0xEE << 16);
+         { uint64_t _a = ctx->gpr[3]; uint64_t _r = _a + (uint64_t)(int64_t)(0x1700); ctx->gpr[3] = _r; ctx->xer = (ctx->xer & ~(1u << 29)) | ((_r < _a) ? (1u << 29) : 0u); }
+ loc_00572854:
++        saka_cards_hook(ctx);   /* cheat: no suspension for the user's club (r3 = the cards record) */
+         ctx->gpr[0] = vm_read64(ctx->gpr[1] + 0xA0);
+         ctx->lr = ctx->gpr[0];
+         ctx->gpr[28] = _cs_28;

@@ -1,0 +1,79 @@
+diff --git a/recompiled/ppu_recomp_011.cpp b/recompiled/ppu_recomp_011.cpp
+--- a/recompiled/ppu_recomp_011.cpp
++++ b/recompiled/ppu_recomp_011.cpp
+@@ -716,6 +716,9 @@ loc_003CAD24:
+         return;
+ }
+ 
++extern "C" void saka_edit_points_lock_hook(ppu_context* ctx);   /* saka_hooks.c: cheat EDIT points 고정/갱신 */
++extern "C" void saka_edit_points_merge_hook(ppu_context* ctx);
++extern "C" int saka_edit_points_frame(ppu_context* ctx);
+ void func_003CAD38(ppu_context* ctx) {
+     PPU_MM_SNAP
+         uint64_t _cs_25 = ctx->gpr[25];
+@@ -901,6 +904,7 @@ loc_003CAF6C:
+         ctx->gpr[29] = (int64_t)(int32_t)(0x63);
+         vm_write32(ctx->gpr[30] + 0x8A8, ctx->gpr[29]);
+ loc_003CAFCC:
++        saka_edit_points_merge_hook(ctx);   /* cheat EDIT points: 고정 after the slot bonus */
+         ctx->gpr[4] = (int64_t)(int32_t)ctx->gpr[29];
+         ctx->lr = 0x003CAFD4; func_00085780(ctx); DRAIN_TRAMPOLINE(ctx);
+         ctx->gpr[3] = (int64_t)(int32_t)(0x10);
+@@ -2112,6 +2116,17 @@ loc_003CC0BC:
+ 
+ void func_003CC0D4(ppu_context* ctx) {
+     PPU_MM_SNAP
++        if (saka_edit_points_frame(ctx)) {   /* cheat EDIT points: redraw the points tag as func_003CB89C does, if it is there */
++            const uint64_t r3 = ctx->gpr[3], lr = ctx->lr, cr = ctx->cr, xer = ctx->xer, ctr = ctx->ctr;
++            ctx->gpr[3] = vm_read32(r3 + 0x4);
++            ctx->gpr[4] = vm_read32(r3 + 0x94);
++            func_0064BB08(ctx); DRAIN_TRAMPOLINE(ctx);
++            if ((uint32_t)ctx->gpr[3]) {
++                ctx->gpr[4] = (uint32_t)(vm_read32(r3 + 0x8A8) + vm_read32(r3 + 0x8AC));
++                func_000879C0(ctx); DRAIN_TRAMPOLINE(ctx);
++            }
++            ctx->gpr[3] = r3; ctx->lr = lr; ctx->cr = cr; ctx->xer = xer; ctx->ctr = ctr;
++        }
+         uint64_t _cs_28 = ctx->gpr[28];
+         uint64_t _cs_29 = ctx->gpr[29];
+         uint64_t _cs_30 = ctx->gpr[30];
+@@ -3754,6 +3769,7 @@ loc_003CD840:
+         vm_write32(ctx->gpr[5] + 0x0, ctx->gpr[3]);
+         { uint64_t _a = ctx->gpr[7]; uint64_t _r = _a + (uint64_t)(int64_t)(-10); ctx->gpr[3] = _r; ctx->xer = (ctx->xer & ~(1u << 29)) | ((_r < _a) ? (1u << 29) : 0u); }
+         vm_write32(ctx->gpr[30] + 0x8A8, ctx->gpr[3]);
++        saka_edit_points_lock_hook(ctx);   /* cheat EDIT points: 고정 */
+         ctx->gpr[3] = vm_read32(ctx->gpr[6] + -0x7960);
+         ctx->lr = 0x003CD894; func_00611ABC(ctx); DRAIN_TRAMPOLINE(ctx);
+         goto loc_003CD8E0;
+@@ -3770,6 +3786,7 @@ loc_003CD898:
+         ctx->gpr[3] = vm_read32(ctx->gpr[30] + 0x8A8);
+         { uint64_t _a = ctx->gpr[3]; uint64_t _r = _a + (uint64_t)(int64_t)(0xA); ctx->gpr[3] = _r; ctx->xer = (ctx->xer & ~(1u << 29)) | ((_r < _a) ? (1u << 29) : 0u); }
+         vm_write32(ctx->gpr[30] + 0x8A8, ctx->gpr[3]);
++        saka_edit_points_lock_hook(ctx);   /* cheat EDIT points: 고정 */
+         ctx->gpr[3] = vm_read32(ctx->gpr[5] + 0x0);
+         { int64_t a = (int32_t)ctx->gpr[3]; int64_t b = (int64_t)0; uint32_t cr_val = ((a < b) ? 8 : (a > b) ? 4 : 2) | ((ctx->xer >> 31) & 1u); ctx->cr = (ctx->cr & ~(0xFu << 28)) | (cr_val << 28); }
+         if ((!((ctx->cr >> 29) & 1))) goto loc_003CD8E0;
+@@ -5518,6 +5535,7 @@ loc_003CF21C:
+         vm_write8((ctx->gpr[4] + ctx->gpr[3]), ctx->gpr[5]);
+         ctx->gpr[3] = vm_read32(ctx->gpr[30] + 0x90C);
+         vm_write32(ctx->gpr[30] + 0x8A8, ctx->gpr[3]);
++        saka_edit_points_lock_hook(ctx);   /* cheat EDIT points: 고정 */
+ loc_003CF264:
+         ctx->gpr[3] = ctx->gpr[30] | 0x0;
+         ctx->gpr[4] = vm_read32(ctx->gpr[30] + 0xF0);
+@@ -5555,6 +5573,7 @@ loc_003CF288:
+         ctx->gpr[5] = vm_read32(ctx->gpr[30] + 0x8A8);
+         { uint64_t _a = ctx->gpr[5]; uint64_t _r = _a + (uint64_t)(int64_t)(-1); ctx->gpr[5] = _r; ctx->xer = (ctx->xer & ~(1u << 29)) | ((_r < _a) ? (1u << 29) : 0u); }
+         vm_write32(ctx->gpr[30] + 0x8A8, ctx->gpr[5]);
++        saka_edit_points_lock_hook(ctx);   /* cheat EDIT points: 고정 */
+         ctx->lr = 0x003CF2F4; func_00632DF0(ctx); DRAIN_TRAMPOLINE(ctx);
+         ctx->gpr[3] = vm_read32(ctx->gpr[30] + 0x910);
+         ctx->gpr[4] = vm_read32(ctx->gpr[30] + 0x914);
+@@ -5584,6 +5603,7 @@ loc_003CF314:
+         { uint64_t _a = ctx->gpr[4]; uint64_t _r = _a + (uint64_t)(int64_t)(1); ctx->gpr[5] = _r; ctx->xer = (ctx->xer & ~(1u << 29)) | ((_r < _a) ? (1u << 29) : 0u); }
+         ctx->gpr[4] = ctx->gpr[7] | 0x7;
+         vm_write32(ctx->gpr[30] + 0x8A8, ctx->gpr[5]);
++        saka_edit_points_lock_hook(ctx);   /* cheat EDIT points: 고정 */
+         ctx->lr = 0x003CF364; func_00632DF0(ctx); DRAIN_TRAMPOLINE(ctx);
+         ctx->gpr[3] = vm_read32(ctx->gpr[30] + 0x910);
+         ctx->gpr[4] = vm_read32(ctx->gpr[30] + 0x914);

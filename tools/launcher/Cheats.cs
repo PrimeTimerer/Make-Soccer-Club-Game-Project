@@ -124,6 +124,57 @@ namespace SakatsukuLauncher
             }
             return legends;
         }
+        // Play styles (1-66), skill types (1-16) and skills (name id (type-1)*7+level for 1-112, original skills
+        // 113-181) of data\text2 (2026-11-09, the play style editor).
+        public static Dictionary<int, string> PlayStyles(Launcher launcher) { return Txb(launcher, @"text2\playstyle_name.txb"); }
+        public static Dictionary<int, string> SkillTypes(Launcher launcher) { return Txb(launcher, @"text2\skill_type_name.txb"); }
+        public static Dictionary<int, string> Skills(Launcher launcher) { return Txb(launcher, @"text2\skill_name.txb"); }
+        static Dictionary<int, string> Txb(Launcher launcher, string relative)
+        {
+            List<Dictionary<int, string>> t = Load(launcher, relative);
+            return t.Count > 0 ? t[0] : new Dictionary<int, string>();
+        }
+
+        // cheats\playstyles.txt (tools\make_playstyles.py): Korean names, tier (1 base, 2 upper, 3 top) and family (the
+        // base style) of each play style from the style master 0x27; Korean names of skill types (with the level-7 name)
+        // and original skills (2026-11-09, owner: "번역도 해줘 ... 계열중에서 하이클래스인지도 구분").
+        public class StyleInfo
+        {
+            public string Ko, Ja;
+            public int Tier, Family;
+        }
+
+        public static Dictionary<int, StyleInfo> StyleInfos = new Dictionary<int, StyleInfo>();
+        public static Dictionary<int, string[]> SkillTypeKo = new Dictionary<int, string[]>();   // korean, level-7 korean
+        public static Dictionary<int, string> OriginalKo = new Dictionary<int, string>();
+
+        public static void LoadPlayStyles(Launcher launcher)
+        {
+            if (StyleInfos.Count > 0)
+                return;
+            try
+            {
+                string path = Path.Combine(Cheats.Dir(launcher), "playstyles.txt");
+                if (!File.Exists(path))
+                    return;
+                foreach (string line in File.ReadAllLines(path, Encoding.UTF8))
+                {
+                    string[] f = line.Split('\t');
+                    int id;
+                    if (f.Length < 3 || !int.TryParse(f[1], out id))
+                        continue;
+                    if (f[0] == "style" && f.Length >= 6)
+                        StyleInfos[id] = new StyleInfo { Ko = f[2], Ja = f[3], Tier = int.Parse(f[4]), Family = int.Parse(f[5]) };
+                    else if (f[0] == "type" && f.Length >= 5)
+                        SkillTypeKo[id] = new[] { f[2], f[4] };
+                    else if (f[0] == "orig")
+                        OriginalKo[id] = f[2];
+                }
+            }
+            catch (Exception)
+            {
+            }
+        }
         public static Dictionary<int, string> Clubs(Launcher launcher) { return Static(launcher, 4); }
         public static Dictionary<int, string> Staff(Launcher launcher) { return Static(launcher, 9); }
         public static Dictionary<int, string> Scouts(Launcher launcher) { return Static(launcher, 10); }
@@ -342,15 +393,23 @@ namespace SakatsukuLauncher
         }
 
         public const uint Roster = 0x00EE2954, Record = 0x218;
+        // The youth team: 15 records of the same layout (2026-11-09); slots 23-37 here.
+        public const uint Youth = 0x00EE86E0;
+        public const int YouthSlots = 15;
+
+        static uint SlotBase(int slot)
+        {
+            return slot < 23 ? Roster + Record * (uint)slot : Youth + Record * (uint)(slot - 23);
+        }
 
         public uint PlayerId(int slot)
         {
-            return Read(Roster + Record * (uint)slot, 4);
+            return Read(SlotBase(slot), 4);
         }
 
         public uint Player(int slot, int offset, int size)
         {
-            return Read(Roster + Record * (uint)slot + (uint)offset, size);
+            return Read(SlotBase(slot) + (uint)offset, size);
         }
 
         public static bool ValidPlayer(uint id)
@@ -370,7 +429,7 @@ namespace SakatsukuLauncher
     {
         public string Name, Title, Origin, Category, Note = "";
         public int Codes;
-        public bool OnceDefault, Switch;
+        public bool OnceDefault, Switch, Lockable;   // Lockable: "#@lock", a code switch that honours 고정/갱신
         public readonly List<CheatValue> Values = new List<CheatValue>();
     }
 
@@ -388,14 +447,52 @@ namespace SakatsukuLauncher
             return Path.Combine(Dir(launcher), "BLJM61064.txt");
         }
 
+        // The settings of the save in use (2026-11-09, owner: per save as in YKTK3). The game writes which save it plays to
+        // cheats\live\save.txt ("MAIN00\t세이브 1 (MAIN00.DAT)", "new\t새 게임 …", "\t타이틀·에디트 …"); that save's
+        // settings are in cheats\saves\<id>\, the title's in cheats\ itself. The file stays after the game ends: the save
+        // played last, which the launcher edits until the game says otherwise.
+        public static string ProfileId(Launcher launcher, out string description)
+        {
+            description = "타이틀·에디트 (공통 설정)";
+            try
+            {
+                string path = Path.Combine(Dir(launcher), "live", "save.txt");
+                if (File.Exists(path))
+                {
+                    string[] f = File.ReadAllText(path, Utf8).Trim('\r', '\n', '﻿').Split('\t');
+                    if (f.Length >= 2 && f[1].Length > 0)
+                        description = f[1];
+                    return f[0].Trim();
+                }
+            }
+            catch (IOException)
+            {
+            }
+            return "";
+        }
+
+        public static string ProfileDir(Launcher launcher)
+        {
+            string description;
+            string id = ProfileId(launcher, out description);
+            return id.Length == 0 ? Dir(launcher) : Path.Combine(Dir(launcher), "saves", id);
+        }
+
+        public static string ProfileCaption(Launcher launcher)
+        {
+            string description;
+            ProfileId(launcher, out description);
+            return "이 설정: " + description + "  ·  치트·선수·목록 설정은 세이브마다 따로입니다 (게임이 지금 또는 마지막으로 쓴 세이브).";
+        }
+
         static string EnabledPath(Launcher launcher)
         {
-            return Path.Combine(Dir(launcher), "enabled.txt");
+            return Path.Combine(ProfileDir(launcher), "enabled.txt");
         }
 
         static string ValuesPath(Launcher launcher)
         {
-            return Path.Combine(Dir(launcher), "values.txt");
+            return Path.Combine(ProfileDir(launcher), "values.txt");
         }
 
         public static string[] Lines(string path)
@@ -438,6 +535,8 @@ namespace SakatsukuLauncher
                     last.Note = line.Substring(7).Trim();
                 else if (last != null && line == "#@once")
                     last.OnceDefault = true;
+                else if (last != null && line == "#@lock")
+                    last.Lockable = true;
                 else if (last != null && line.StartsWith("#@value "))
                 {
                     string[] f = line.Substring(8).Split('|');
@@ -536,13 +635,14 @@ namespace SakatsukuLauncher
                 enabled.Add(name);
             else
                 enabled.Remove(name);
-            Directory.CreateDirectory(Dir(launcher));
+            Directory.CreateDirectory(ProfileDir(launcher));
             // Only names the file still has, in its order.
             var names = List(launcher).Select(c => c.Name).Where(enabled.Contains);
             File.WriteAllText(EnabledPath(launcher), string.Join("\r\n", names) + "\r\n", Utf8);
         }
 
-        // values.txt: "<cheat name>\t<n>\t<value>" and "<cheat name>\tonce\t0|1" (saka_hooks.c cheats_values).
+        // values.txt: "<cheat name>\t<n>\t<value>", "<cheat name>\tonce\t0|1" and "<cheat name>\trefresh\t<count>" (갱신:
+        // a new count writes a once cheat again) (saka_hooks.c cheats_values).
         public static Dictionary<string, string> Values(Launcher launcher)
         {
             var values = new Dictionary<string, string>();
@@ -562,7 +662,7 @@ namespace SakatsukuLauncher
                 values.Remove(name + "\t" + key);
             else
                 values[name + "\t" + key] = value;
-            Directory.CreateDirectory(Dir(launcher));
+            Directory.CreateDirectory(ProfileDir(launcher));
             File.WriteAllText(ValuesPath(launcher), string.Join("", values.Select(kv => kv.Key + "\t" + kv.Value + "\r\n")), Utf8);
         }
 
@@ -685,22 +785,47 @@ namespace SakatsukuLauncher
                         extra.Children.Add(kind);
                         foreach (CheatValue v in cheat.Values)
                             extra.Children.Add(ValueLine(cheat, v, values));
-                        if (!cheat.Switch)
+                        // 고정 for data cheats and for a code switch that takes a value; 갱신 (write the value once more) while
+                        // 고정 is off (2026-11-09, owner: "고정도 가능하게 해주고 갱신도 가능하게 해서 변경도 가능해야해").
+                        if (!cheat.Switch || cheat.Lockable)
                         {
+                            Button refresh = null;
                             var lockBox = Ui.Switch(!Cheats.Once(Launcher, cheat), delegate(bool locked)
                             {
                                 try
                                 {
                                     Cheats.SetValue(Launcher, cheat.Name, "once", locked == !cheat.OnceDefault ? null : (locked ? "0" : "1"));
-                                    Window.Toast(cheat.Title + (locked ? ": 고정 (1초에 10번 다시 씀)" : ": 한 번만 씀 (켤 때·값을 바꿀 때)"));
+                                    Window.Toast(cheat.Title + (locked ? ": 고정 (계속 다시 씀)" : ": 한 번만 씀 (켤 때·값을 바꿀 때·갱신 때)"));
+                                    if (refresh != null)
+                                        refresh.Visibility = locked ? Visibility.Collapsed : Visibility.Visible;
                                 }
                                 catch (Exception error)
                                 {
                                     Window.Error("설정을 저장하지 못했습니다", error);
                                 }
-                            }, "고정 (끄면 켤 때 한 번만 씀)");
-                            lockBox.Margin = new Thickness(0, 6, 0, 0);
-                            extra.Children.Add(lockBox);
+                            }, "고정 (끄면 켤 때·값을 바꿀 때·갱신 때 한 번만 씀)");
+                            refresh = Ui.Button("갱신", delegate
+                            {
+                                try
+                                {
+                                    string refreshText;
+                                    int n;
+                                    Cheats.Values(Launcher).TryGetValue(cheat.Name + "\trefresh", out refreshText);
+                                    int.TryParse(refreshText, out n);
+                                    Cheats.SetValue(Launcher, cheat.Name, "refresh", (n + 1).ToString());
+                                    Window.Toast(cheat.Title + ": 갱신 (지금 값을 한 번 더 씀)" + (Game.IsRunning ? "" : " · 게임을 켜면 적용"));
+                                }
+                                catch (Exception error)
+                                {
+                                    Window.Error("설정을 저장하지 못했습니다", error);
+                                }
+                            }, null, "");
+                            refresh.Padding = new Thickness(10, 3, 10, 3);
+                            refresh.Margin = new Thickness(10, 0, 0, 0);
+                            refresh.Visibility = Cheats.Once(Launcher, cheat) ? Visibility.Visible : Visibility.Collapsed;
+                            var lockRow = Ui.Row(lockBox, refresh);
+                            lockRow.Margin = new Thickness(0, 6, 0, 0);
+                            extra.Children.Add(lockRow);
                         }
                         string hint = (cheat.Origin.Length > 0 && cheat.Origin != "PS3" ? "Vita: " + cheat.Origin : "PS3 포트") +
                                       (cheat.Note.Length > 0 ? " · " + cheat.Note : "");
@@ -732,7 +857,21 @@ namespace SakatsukuLauncher
             foreach (string name in Cheats.NotMoved(Launcher))
                 notMoved.Children.Add(Ui.Text("· " + name, "Caption"));
 
-            return Ui.Page("치트", "게임 안에서도 됩니다: F2 (패드 L3+R3) = 치트 메뉴, F7 = 2배속, F8 = 터보 (x6). 켜고 끄면 게임 중에도 1초 안에 적용됩니다. 고정이 켜진 치트는 값을 1초에 10번 다시 쓰고, 고정을 끄면 켤 때(값을 바꿀 때) 한 번만 씁니다. 끄면 더 쓰지 않을 뿐, 이미 바뀐 값은 그대로 남습니다.",
+            // 설치한 시설 수 (owner, 2026-11-09: "어디까지가 최대인지 체크하고 ... 내가 얼마나 설치 했는지를 알아 볼 수 있도록"):
+            // the stadium's and the clubhouse's 27 slots (6 bytes, facility ID at +0; 0x00EE7B64 / 0x00EE7C06), all the game holds.
+            string facilities = "게임을 불러오면 여기에 나옵니다.";
+            LiveState live = LiveState.Load(Launcher);
+            if (live != null && live.Has(0x00EE7B64u, 27 * 6 * 2))
+            {
+                int stadium = Enumerable.Range(0, 27).Count(i => live.Read(0x00EE7B64u + 6u * (uint)i, 1) != 0);
+                int club = Enumerable.Range(0, 27).Count(i => live.Read(0x00EE7C06u + 6u * (uint)i, 1) != 0);
+                facilities = "구장 시설 " + stadium + " / 27칸   ·   클럽하우스 시설 " + club + " / 27칸   (" + live.Time.ToString("HH:mm:ss") + " 게임 기준)";
+            }
+            var facilityCard = Ui.Card("설치한 시설 수", Ui.Text(facilities, "Body"),
+                Ui.Text("구장과 클럽하우스는 각각 27칸이 게임(세이브)의 최대입니다. 27칸이 다 차면 '시설 수가 상한에 도달' 메시지가 나오고, 다른 시설을 지으려면 '시설 철거'로 칸을 비워야 합니다.", "Caption"));
+
+            return Ui.Page("치트", Cheats.ProfileCaption(Launcher) + "\n" + "게임 안에서도 됩니다: F2 (패드 L3+R3) = 치트 메뉴, F7 = 2배속, F8 = 터보 (x6). 켜고 끄면 게임 중에도 1초 안에 적용됩니다. 고정이 켜진 치트는 값을 계속 다시 쓰고, 고정을 끄면 켤 때·값을 바꿀 때·갱신을 누를 때 한 번만 씁니다. 끄면 더 쓰지 않을 뿐, 이미 바뀐 값은 그대로 남습니다.",
+                facilityCard,
                 Ui.Card("찾기", Ui.Row(Ui.Text("이름·설명으로 찾기  ", "Caption"), search)),
                 Ui.Card("치트 (분류별)", list,
                     Ui.Text("모두 지금 구단의 데이터에 씁니다. GM이 다른 구단·리그로 옮기면 게임이 그 구단을 같은 자리에 다시 만들므로 옮긴 구단에만 적용됩니다. 선수 한 명씩은 '선수' 페이지, 후보 목록은 '목록' 페이지에서. 세이브하면 바뀐 값이 저장되니 먼저 세이브 페이지에서 백업하세요. 안전 설정으로 실행하면 치트는 꺼집니다.", "Caption")),

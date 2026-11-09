@@ -1,0 +1,38 @@
+diff --git a/recompiled/ppu_recomp_016.cpp b/recompiled/ppu_recomp_016.cpp
+--- a/recompiled/ppu_recomp_016.cpp
++++ b/recompiled/ppu_recomp_016.cpp
+@@ -19290,6 +19290,7 @@
+         return;
+ }
+ 
++extern "C" void saka_foreign_lineup_hook(ppu_context* ctx);   /* saka_hooks.c cheats (2026-11-09) */
+ void func_005864DC(ppu_context* ctx) {
+     PPU_MM_SNAP
+         uint64_t _cs_24 = ctx->gpr[24];
+@@ -19471,6 +19472,7 @@
+         ctx->gpr[26] = (int64_t)(int32_t)(1);
+ loc_00586748:
+         ctx->gpr[3] = ctx->gpr[26] | 0x0;
++        saka_foreign_lineup_hook(ctx);   /* cheat: the lineup's foreign players within the limit */
+         ctx->gpr[0] = vm_read64(ctx->gpr[1] + 0xD0);
+         ctx->lr = ctx->gpr[0];
+         ctx->gpr[24] = _cs_24;
+diff --git a/recompiled/ppu_recomp_028.cpp b/recompiled/ppu_recomp_028.cpp
+--- a/recompiled/ppu_recomp_028.cpp
++++ b/recompiled/ppu_recomp_028.cpp
+@@ -10,6 +10,7 @@
+ extern "C" void saka_personal_mult_hook(ppu_context* ctx);   /* saka_hooks.c cheats (2026-11-09) */
+ extern "C" void saka_train_personal_keep_hook(ppu_context* ctx);   /* saka_hooks.c cheats (2026-11-09) */
+ extern "C" void saka_awaken_limit_mult_hook(ppu_context* ctx);   /* saka_hooks.c cheats (2026-11-09) */
++extern "C" void saka_satisfaction_hook(ppu_context* ctx);   /* saka_hooks.c cheats (2026-11-09) */
+ extern "C" void saka_full_house_hook(ppu_context* ctx);   /* saka_hooks.c cheats (2026-11-09) */
+ #include <stdio.h>
+ #include <string.h>
+@@ -47231,6 +47232,7 @@
+         { uint64_t _a = ctx->gpr[6]; uint64_t _r = _a + (uint64_t)(int64_t)(0x2934); ctx->gpr[6] = _r; ctx->xer = (ctx->xer & ~(1u << 29)) | ((_r < _a) ? (1u << 29) : 0u); }
+         vm_write32(ctx->gpr[1] + 0x80, ctx->gpr[7]);
+         ctx->lr = 0x00541CA0; func_0053D558(ctx); DRAIN_TRAMPOLINE(ctx);
++        saka_satisfaction_hook(ctx);   /* cheat: the supporters' survey grades all S (r27, r29-r31) */
+         ctx->gpr[5] = vm_read32(ctx->gpr[23] + 0x5364);
+         ctx->gpr[4] = (int64_t)(int32_t)((uint32_t)0x54 << 16);
+         ctx->gpr[3] = (int64_t)(int32_t)ctx->gpr[5];

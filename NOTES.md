@@ -1,7 +1,13 @@
 # Sakatsuku PS3 (BLJM61064, 1.03) — ps3recomp port notes
 
 1.03 runtime contract (boot mode, VFS, DLC = not used):
-`..\Fight Emulations\Saka Tsuku - Pro Soccer Club o Tsukurou (Japan)\PC PORT\PORT_1.03_RUNTIME.md`
+`docs\PORT_1.03_RUNTIME.md` (moved from `..\Fight Emulations\Saka Tsuku - Pro Soccer Club o Tsukurou (Japan)\PC PORT` on 2026-11-09).
+Folder tidy-up of 2026-11-09:
+- `docs\` holds the runtime contract and the merge manifest.
+- `tools\ps3\` holds the PKG/SELF extraction scripts (git-ignored, Sony keys).
+- `originals\` holds the owner's ISO, the update PKG and the Korean patch exe (git-ignored).
+- `make_release.bat` makes `dist\`.
+- Old logs and builds moved to `Desktop\_사카츠쿠_삭제대기` (`_이동기록.txt` lists where each came from).
 
 ## Layout
 | Path | What |
@@ -42,7 +48,7 @@ Boot reaches the following, then stops:
 0 frames were dumped.
 
 ## Run 2–4 (2026-11-06): LLE SPURS → title screen
-- **LLE:** libsre and libspurs_jq from the owner's FW 4.93 (`game/firmware/*.sprx`) were decrypted with `..\PC PORT\tools\self_decrypt.py`. They were relocated with `lift_prx.py` (libsre 0x30000000, libspurs_jq 0x30100000) and lifted with `--raw --symbol-prefix <m>_ --hle-stubs` (stubs from `tools/prx_hle_stubs.py`) into `prx_src/<m>/`. `stubs.cpp ps3_load_prx_modules()` loads `game/firmware/<m>_image.bin` through `prx_loader`, and game imports then resolve via `prx_resolve_export`.
+- **LLE:** libsre and libspurs_jq from the owner's FW 4.93 (`game/firmware/*.sprx`) were decrypted with `tools\ps3\self_decrypt.py` (was `..\PC PORT\tools\`). They were relocated with `lift_prx.py` (libsre 0x30000000, libspurs_jq 0x30100000) and lifted with `--raw --symbol-prefix <m>_ --hle-stubs` (stubs from `tools/prx_hle_stubs.py`) into `prx_src/<m>/`. `stubs.cpp ps3_load_prx_modules()` loads `game/firmware/<m>_image.bin` through `prx_loader`, and game imports then resolve via `prx_resolve_export`.
 - `PORT_SPU_INPUTS` = EBOOT plus both PRX files, giving 6 lifted SPU images. The SPURS kernel runs on 6 SPUs.
 - The game reads its text tables, `sb2/bg_top_menu.par`, `stream/bgm_title.adx` and `sb/top_menu.par`. The **title screen renders** and animates ("PRESS START BUTTON").
 - It draws into a 1280x720 surface at 0x00F00000 while the registered display buffers are 0x0 and 0x3C0000. **`RT_DISPLAY_BY_SIZE=1` is required** (set in run.bat and quiet_run.ps1).
@@ -1139,3 +1145,167 @@ Owner: "선수나 감독 스카우트 목록을 검색할때 영어로도 검색
   - Searching a legend's real name finds the stand-in first: maradona → ディエゴ・マルドラド, cruyff → グラーフ, zidane → ディザン, kamamoto → 河本 鬼茂. Checked in F2 (capture f2g).
   - Order ties compare names without the tag; the brackets show the Japanese name's romaji only.
 - Test aids: `SAKA_OVERLAY_SEARCH=<text>` and `SAKA_OVERLAY_LIST=0-2` (F2 lists tab: the first search text and the list shown first).
+
+## Cheats v3: locks that hold in game (2026-11-09, owner: "돈 마저도 고정이 안돼네", "모든 치트들의 고정이 제대로 되지않으면 진짜 문제야", "구장시설은 아예 제한이 풀리지도 않았어", "고정도 가능하게 해주고 갱신도 가능하게 해서 변경도 가능해야해", "REA로")
+- **Money:** the cheat thread kept 0x00EE2844 at 99,999,999, but the HUD (FUN_00084C38) is drawn when the money changes, so after a purchase it showed the lowered amount. The game changes money in three places only (re/decomp_all.c: FUN_0053F3A0 add with the month's ledger 0x00EE2850[cat], FUN_0053F434 weekly instalments, FUN_00544558 event money; each stores the old amount at 0x00EE2848 and clamps at ±99,999,999). `saka_money_hook` after each store puts the locked value back (patches/recompiled-0008-money-facility-hooks.patch; EDIT points: recompiled-0007-edit-points-lock.patch). 
+- **Facilities:**
+  - Clubhouse: check FUN_0054F92C (0 built, 1 over capacity, 2 money, 3 level, 4/5 can), build FUN_0054220C, used space FUN_005402C4 = the sizes of the 27 built slots (0x00EE7C06, 6 bytes). Master table 0x2B: 41 x 0x14 at 0x00E25B2C (static in the EBOOT; header 0x00E25E60 = count 0x29, base); +0xA size, +9 weeks/2, +8 cost.
+  - Stadium: check FUN_0054F130 (same codes; 3 = stadium type via FUN_0053E5B4), build FUN_00542100, used space FUN_00540238 (27 slots at 0x00EE7B64). Master table 0x2A: 50 x 0x10 at 0x00E25E68; +0xA size. Capacity: FUN_004CE65C(stadium level) +0x13 (table 0x43).
+  - Master headers: FUN_00574270(id) = pointer array 0x008D4A9C; header +0 count, +4 records (all static data).
+  - Switch 5 turned "over capacity" into "can", which let the clubhouse reach SPACE 48/20 and broke its list (owner screenshot). Now: switch 5 only lifts code 3 (clubhouse level / stadium type), at both checks, and the same cheat writes size 0 into both master tables (data codes), so used space stays 0 and capacity is never exceeded. The build still needs a free slot of 27 (the game simply does not build otherwise). Switch 6 (1 week) also hooks the stadium build.
+  - Writing the master tables is undone by restarting the game (EBOOT data).
+- **Switch values, 고정, 갱신:**
+  - A code switch can carry a value (`$F0nn 0 value`, replaced through values.txt like a data code). saka_hooks.c keeps per switch its value, 고정 (not "once") and a generation that goes up when it is turned on, its value or 고정 changes, or 갱신 (values.txt `<name>\trefresh\t<count>`).
+  - Once cheats (고정 off) are written again only when they themselves change (turned on, values, 고정, 갱신). Before, any change of the three cheat files wrote every once cheat again.
+  - Launcher cheat page and F2 menu: 고정 also for a switch with a value; 갱신 button while 고정 is off.
+- **EDIT points (switch 7):** the points (edit menu object, heap, +0x8A8) are spent in func_003CC0D4, the menu's update: an item level (+0x8B0[i], 0-3) costs 10, an ability point 1; going back refunds; cancelling restores +0x90C. 고정: the value is put back after each of those five stores and after the slot bonus (func_003CAD38, also r29 for its display); the update's entry puts it back if anything else changed it and redraws the points tag (func_0064BB08 lookup + func_000879C0, the way func_003CB89C does; skipped if the tag is missing). 고정 off: the value at a new player's start, and once when turned on / changed / 갱신, also in the middle of an edit. Value 0-99 (the game's cap), 99 in the list.
+- **Audit and more cheats (same day, REA Ghidra via re/decomp_all.c; three read-only analysis agents):**
+  - 면담 무제한: interviews are limited per month (1 + GM skills 0x73/0x74; "今月は面談を行うことはできません"). func_00590B58(mask) tests the month's flags 0x00EECE24 (bits 1/0x20/0x40/0x80, set by func_003F9DF0, cleared monthly by func_0058B004); switch 9 makes it read them as clear (patches/recompiled-0009-interview.patch), on top of the data write.
+  - 각성 포인트 "0%": the points are written (65535); the gauge (func_00568C60, thresholds table 0x54) is 0 at level 15, which the 각성 레벨 cheat locks. Notes updated; to get awakening events, use the points cheat without the level cheat.
+  - GM styles usable: per style i (1-16) at 0x00F8CE28 + i*0xFC: +0xF4 bit 0 unlocked, +0xF8 u8 level (max 10), +0xFC u32 exp (Lv10 = 22500 for 1-5, 45000 for 6-16; master 0x90). The cheat now writes level 10 and those exps; skills apply when func_005063B0 runs (GM exp gain, style change). Live values matched (style 5 Lv1 exp 1488).
+  - 유망주 발견 1턴: a running visit counts down a copy at 0x00F8EEE1 (func_0053557C / func_0051EC6C): now written too, all as $C000.
+  - 서포터 평가 S removed: 0x00F99294 is outside the save and no code reads it.
+  - Euro list replacement into an empty slot needs a free record of the 500 overseas status records (0x00F0C4B8); the live save had 500 of 500 used, so the engine skipped it. The F2 list tab says so for an empty euro slot.
+  - Facility count: 27 slots each for clubhouse and stadium (save structure); the owner's save had all 54 used ("시설 수가 상한에 도달").
+  - Training (switches 10-14): course conditions (func_005122DC) and the 能力覚醒 ready bit; slot keep (snapshot before the weekly passes of func_005177A0, the slot put back after func_00515B80 / func_0050CD18 clear it, with the course's full time from the masters); multipliers for normal training (func_00515548), SP weekly and end, 個性強化 exp, 能力覚醒 limit rise, awakening points (func_00568B08). Slots stay 3 (save structure).
+  - Negotiation (switch 15): func_0053115C (2 sign, 1 one more, 0 refused) returns 2; the club's fee talks go through it too. Full house (switch 16): func_0053D7A8 takes the game's full-house branch after func_004D1190(0xF). patches/recompiled-0010-training-negotiation-full-house.patch.
+  - Switch arrays 16 -> 32; only a switch marked "#@lock" in the list (EDIT 99) shows 고정/갱신.
+  - F2 and launcher: players (새로고침 re-reads the game's values and writes once edits again, 전부 고정, 전부 한 번만, 전체 선수에 적용, 전부 해제) and lists (새로고침, 전부 고정, 전부 한 번만, 전부 해제).
+- **Per-save settings (owner: "세이브 파일별로 별도로 작동하는 메커니즘을 야구츠쿠3의 치트적용 관련해서 참고해"; YKTK3 keeps cheat_saves/<save>/):**
+  - enabled.txt, values.txt, players.txt, lists.txt live in cheats/saves/<id>/ ("MAIN00".. = BLJM61064-SAVEDATA/MAINnn.DAT, "new" for an unsaved new game); the title and its EDIT mode use cheats/ itself; BLJM61064.txt is shared.
+  - Which save: ps3recomp's cellSaveData calls g_savedata_file_hook after each file operation (patches/0023-savedata-file-hook.patch). A MAINnn.DAT read since the title + a roster different from the title's = that save; a different roster without a read = a new game (empty settings); a save into another slot copies the settings there. The title is the menu file open (main.cpp, sb2/bg_top_menu.par or sb/top_menu.par).
+  - The first save used takes the settings that were in cheats/ (marker cheats/saves/from_cheats.txt). cheats/live/save.txt tells the launcher; the F2 menu shows "이 설정: …" and reloads when the save changes; the launcher pages show the same line.
+  - Bench (separate cwd copy): loading MAIN00 logged "settings of: 세이브 1 (MAIN00.DAT)", migrated 39 enabled cheats. Bench path to load: START, W10, D, O (LOAD GAME), O (ロード), O (slot 1), L (YES), O.
+  - Not seen yet: a new game, saving into another slot, returning to the title from a game.
+- **Youth team (owner: "유스 선수들이 매 턴마다 각성을 하는 수준으로 성장해. psv파일에 봐바"):** the .psv has no youth codes. Its player cheats all write the 23 first-team records. The owner's pasted WAKTE 1TURN is 若手発掘 in a week, already in the list as 유망주 발견 1턴.
+  - The youth team is 15 player records of the same 0x218 layout at 0x00EE86E0. Live: five 16-year-olds, awakening level 1-3, abilities 8-18, limits 28-48.
+  - REA Ghidra: func_00519BC0 checks youth slots < 0xF, and 15 x 0xA0 of youth data follow at 0x00EEA648; the youth menu copies 0x28C8 bytes from 0x00EE86E0.
+  - New "유스" cheats (data, all 15 slots): awakening points 65535, limits 100, ability experience 0xFFFF, abilities 100, growth type (value).
+  - The awakening-points multiplier (switch 14) also covers youth records. Not yet seen in game: whether youth awakening follows the points the way the first team's does.
+- **Play style and skill editor (owner: "선수들 각종 스타일이나 스킬은 편집 되는거야?"):**
+  - The record fields were checked against the live save. Player 617 slot 0 = 05 ドリブラー, skills 0A Lv2, 0B Lv2, 09 Lv1, then 0 / FF.
+  - Layout: +0x10A u8 = the style slot in use (0-4). Five slots of 0x30 start at +0x10C: +0 u32 style (data/text2/playstyle_name.txb 1-66), +4 u32 original skill (skill_name.txb 113-181, 0 none), then five 8-byte skills from +8: u32 type (skill_type_name.txb 1-16) and u8 level at +4 (1-7, 0xFF when empty).
+  - The skill name id is (type-1)*7 + level.
+  - Launcher players page: card 플레이스타일·스킬 (StyleCard). F2 players tab: header 플레이스타일·스킬. Both write all fields of a player at once as players.txt b/w<offset> edits, locked or once; no game-side change.
+  - Bench: players.txt "617 w10c 2" and "617 b118 5" in the MAIN00 profile became the live values (state.bin). The F2 shot showed the header, the per-save line, the refresh / apply-to-all buttons, and boxes showing current values.
+- **European list into an empty slot (owner: "빈 칸: … 500칸이 다 차서 … 이걸 좀 해결해야하는데"):**
+  - The 500 overseas status records (0x00F0C4B8, 12 bytes: +0 id, +4 age, +5 1-4, +8 flags) are a fixed, normally full pool. func_004CB098 only looks a player up (no allocation); func_0052DEFC is the game's own allocator.
+  - The engine now follows the game's own allocator: a free record, else the highest record whose player is in neither the European list nor the 0x00EE7340 list (and not wanted by another euro edit). That record is cleared, its id set, +4 = the player's base age (player master +0x10: table 1 for ids < 10000, table 2 above, 0x3C records), and +5 = 1-4.
+  - An empty slot's entry gets +4 = 2, +5 = age, as func_0052E190 writes one. A player already listed is not put in twice.
+  - Bench: 6886 (no record) went into empty slot 2 and took record 499 (player 178, unlisted).
+- **Team list (owner: "팀의 실제 선수 리스트가 꼭 나와야 하고 몇명인지 어떤 포지션들로 몇명있는지도"):**
+  - The F2 and launcher lists show all 23 club slots (empty ones as (빈 칸)); the numbers are the game's slots.
+  - A header gives the count by group and by position, and each row shows its position. Position = +0x204 u32 (0 GK, 1 LSB, 2 RSB, 3 CB, 4 DM, 5 LSM, 6 RSM, 7 OM, 8 LWG, 9 RWG, 10 FW; the names of pledit_ability_name 19-29). Checked: 佐藤 GK (0), the FWs 10.
+  - The youth team's 15 follow with the same summary. Player edits (players.txt) also apply to youth records.
+- **Play style names, tiers, families (owner: "번역도 해줘. 스킬도 마찬가지고 … 계열중에서 하이클래스인지도 구분"):**
+  - tools/make_playstyles.py writes cheats/playstyles.txt from the text2 names and the style master table 0x27 (67 x 0x3C at 0x00E12B08: +4 family = base style 1-15, +8 tier 1/2/3, +0x10 skill types), with Korean names. 기술 트랩 follows the Korean patch.
+  - The editors group styles by family, base first, with ★ / ★★ / ★★★ and "Korean (Japanese)" labels. Skill types show their level-7 name; original skills are in Korean.
+- **Refresh at the right (owner: "리스트 리프레시는 오른쪽에 위치해야하고", "팀도 그렇고"):** the F2 main tab bar and the lists sub-tab bar end with a trailing 새로고침 tab button. It acts on the shown tab: cheats re-read, players re-read and write once again, lists write again. The launcher's 목록 새로고침 sits at the right of the team list.
+- **Foreign players in the lineup (owner: "외국인 선수 정원초과도 제발 해결해주고"):**
+  - The formation screen's 외국인 선수 정원 초과 is game_before_info_text 11002 / menu_prac_information_text 10212 (外国籍選手枠をオーバーしています).
+  - func_005864DC counts the foreign players of the starting 11 and the 7 substitutes against the league rules from func_0057F700 (+4 foreign limit, +8 Asian slots, +0xC special slots) and returns 0 when over. Its only caller func_00633E50 then returns 3, which the menus FUN_0038A7E0 / FUN_00432FCC (before a match) and FUN_0042973C (team) show as that message.
+  - Switch 3 (FOREIGN PLAYER FRAME OVER) now also makes it return 1 (saka_foreign_lineup_hook, patches/recompiled-0011-foreign-lineup-satisfaction.patch). Its free-slot part (func_00584388) is unchanged.
+- **Facility count (owner: "구장과 클럽하우스의 시설설치 상한도 어디까지가 최대인지 체크하고 … 얼마나 설치 했는지를 알아 볼 수 있도록"):**
+  - The maximum is 27 per area: the stadium's 27 x 6 slots at 0x00EE7B64 end where the clubhouse's 27 x 6 begin (0x00EE7C06), and the save holds exactly these.
+  - The owner's game had 27/27 in both (cheats/live/state.bin), so 施設の数が上限に達しています is that hard limit. Space and level limits are already lifted by switch 5 and the size-0 codes.
+  - The F2 header and the launcher's cheats page show 구장 n/27 · 클럽하우스 n/27.
+- **Satisfaction S (owner: "경기 후 만족도도 S로 잘 작동하다가 잘 먹히지 않에"):** there was no such cheat; the earlier S grades were the game's own.
+  - func_00541640 (from func_00576DA0 after the user's match; result at 0x00F99290) grades the survey 1-6 (E D C B A S): content (func_00541270, r31), players (the best player's rating, r29), facilities (built facilities' satisfaction, r30) and promotion (promotions run, r27).
+  - The overall is the average of the four, and the supporters gained use them. The owner's B = S + A + S + E, the E because no satisfaction promotion was run.
+  - New switch 17 (SATISFACTION S, $F011): saka_satisfaction_hook after func_0053D558 sets all four to 6, so the overall and the supporter gain are S.
+- **Per-player multipliers (owner: "이것도 선수별로 개별로도 가능하게 … 중복이나 이런 문제가 발생할수 있는것에 대한 방지 대책도"):**
+  - Stored as players.txt fields xt (normal training), xs (special training / 秘蔵っ子), xa (awakening points), 1-100, set in the F2 players tab and the launcher's players page (card 선수별 배수).
+  - saka_hooks.c cheat_mult_for finds the player from the record the hook gets: r3, or r4 = record + ability for the limit rise. Only the club's 23 and the youth team's 15 match.
+  - The player's own value replaces the switch's; the two are never multiplied, and his value works with the switch off.
+  - One value per player and kind: the editors replace, and the loader keeps the last line. A player who left matches no record, so his line does nothing.
+  - SP-end awakening points get the larger of special and awakening, not their product (before: both switches multiplied). Two tables are swapped on reload.
+  - The team lists mark players with their own multipliers (배수 연습x5 …).
+- **Team skill (試合指示) count and time (owner: "게이지 무한 유지와 시도개수 무한"):** REA rizin byte searches plus the game's text.
+  - staff_sp_text 219-223 name the two settings. func_005063B0 / func_00505DBC store them weekly at game state 0x00EE27A0 + 0x4550 / + 0x4554:
+    - u32 0x00EE6CF0 = 試合指示 uses per match (3; 4/5/6 with staff abilities 221-223);
+    - u32 0x00EE6CF4 = effect-time extension in minutes (0; 5/10 with 219/220).
+  - No direct loads of either were found (no lwz with displacement 0x4550/0x4554, nor 0x6CF0 under lis 0xEE; the 0x2028 hits are 0x00F8DFD8). The match reaches them some other way, not traced.
+  - Cheat MATCH ORDERS (category 경기) locks them at 9 uses and +90 min (values 1-99 / 0-90), the game's own mechanism.
+  - Not seen in a match yet. The bench match (matchbench2.ps1 = matchbench with -Cwd/-Prep) stopped at the locker room: the save's lineup is invalid (控えに出場可能な選手がいます, code 4 of func_00633E50).
+  - Found on the way: the +0xD74 "3 - used" counter with skill_info_turn is in a board-style mode (0x0004xxxx-0x0006xxxx, "koma"), not the match.
+- **Suspensions (owner: "레드카드를 받거나 옐로우가 누적되어서 출장이 불가능해지지 않도록"):**
+  - func_004A206C records each match per competition and player: 5 bytes = games, goals, assists, rating, cards.
+    - Tables: league 0x00F0FB78 + c x 0x2EA4; the others from 0x00EE27A0 + 0x5322C. Each record is at +0x22E8 + team x 0x73 + slot x 5.
+    - Match entries come from the match data (team + 0x60C + slot x 0x24): +0x19 yellows, +0x1A red, +0x1B played.
+  - Cards byte: 0x80 = suspended next match (red, or two yellows in a match); low 7 bits = yellows collected, against the competition's limit (2 or 4, rule +2).
+  - func_0049D020 sets who can play (+0xFC of the team's player copies: 2 / 1 / 0) through func_00572524(competition, club, slot).
+  - New switch 18 (NO SUSPENSION, $F012): at func_00572524's return, the user's club's cards byte is cleared (club 0x100 or u32 0x00EE28AC, as func_0049578C). The game's empty record 0x00EE1700 is skipped. patches/recompiled-0012-no-suspension.patch.
+- **Red cards (owner: "레드카드가 거의 한경기당 2개씩은 나와"):** the in-match card decision is not found yet.
+  - Evaluation texts 1200/1210 (FUN_000FA030: status 5 = sent off, +0x19 > 1 = two yellows) only read the result.
+  - The 30 Hz match gate gave the same events as the original run (see logic60), so the rate is likely the game's own; not measured.
+- **Icon (owner: "실행파일의 아이콘도 좀 만들어주라"):** app.ico, a pitch tile with a football, 16-256 px (BMP entries up to 64, PNG above).
+  - Drawn by the scratchpad script make_icon.ps1 (Windows PowerShell 5.1, System.Drawing).
+  - app.rc (`1 ICON "app.ico"`) is picked up by CMakeLists.txt's existing app.rc rule. tools/launcher/icon.ico is the same file (old one in logs/launcher_icon.pre_0409.ico).
+- **Ball following the players (owner: "공이 선수를 늦게 따라가고 선수들의 움직임 틱에 제대로 붙는 느낌이 아니야"):**
+  - The cause was the hop glide (`ball_glide`, SAKA_BALL_SMOOTH, 2026-11-08). After each dribble touch it shrank the distance to the game's ball exponentially over 4-12 calls, so the drawn ball trailed the game's ball and the player.
+  - Now a hop is drawn over one match tick: half on the call it happens, the game's position from the next call. At 30 ticks nothing is glided. `SAKA_BALL_SMOOTH=long` = the old glide, `0` = off.
+  - The [anim60] 5-second line now reports "ball glide N calls, behind the game's ball mean / max".
+  - Bench matches (owner's save, 60 ticks, 60 s each):
+
+    | Run | Glided calls per 5 s | Drawn behind, mean | Max |
+    |---|---|---|---|
+    | old (bl1) | 47-114 | 1.1-1.8 | 4.9-7.9 |
+    | new (bn1) | 3-7 (one per hop) | 2.9-3.7 (half a hop, one frame) | 3.6-4.9 |
+
+  - ball_ahead (steady-motion extrapolation) is unchanged.
+- **Paused 2026-11-09 05:3x (owner: "지금은 일시정지하고 나중에 하자"). Next:**
+  - **Red cards in the match (owner: about two a match):**
+    - The in-match card decision is not found. The match result 0x00F97B24 (teams 0x37C from +0x604; players 0x24 from +0x60C, +0x620 goals, +0x625 yellows, +0x626 red) is not written during the 3D match: `SAKA_CARD_LOG=1` (diagnostic in the cheat thread) logged it only for other clubs' results.
+    - The card models s_card_red01a / yellow01a are loaded by FUN_00269BE0 into the match scene (+0x1E0 / +0x1E4, instances +0x1EC / +0x1F0). The trail from their display back to the referee is not followed yet.
+    - Ask the owner whose players get the cards.
+  - **Team skill unlimited:** the HUD showed 6 with the cheat at 9 (the game's maximum).
+    - Planned: two bench matches with the count at 4 and 5. Patch the copied cheat file's `$0200 00EE6CF0` line, dump once about 50 s into the match (SAKA_LOGIC60=1, SAKA_MEM_DUMP_GATE), then diff for 4 vs 5 to find the in-match count.
+    - The bench needs NO SUSPENSION on to get into a match: the owner's save has suspended starters.
+  - **Bench recipe (scratchpad scripts, may need re-creating):**
+    - matchbench2.ps1 = matchbench.ps1 + `-Cwd` (copied cheats, firmware, spu_jobs, shader cache, as editbench2) + `-Prep <script>` (run on the copy before start).
+    - prep scripts append cheat names to `cheats\saves\MAIN00\enabled.txt` in the copy.
+- **Resumed 2026-11-09 (owner: "멈췄던직전작업 그대로 진행해", "자동으로 팀감지하는 기능은 모든 치트에게서"):**
+  - Team skill: bench dumps with the count at 4/5/9 and a write watch found the match's 試合指示 manager.
+    - Per team t (0x28 apart): +0x2C914 uses left (func_002361EC at kick-off, from the team's max = u32 0x00EE6CF0 capped at 6 for the user), +0x2C918 + slot x 8 state (4 used, 1 running, 3 over), +0x2C91C its time (func_0023A158 copies the engine's).
+    - Uses are taken in func_00239E78 and func_0023A6E8 (state 4).
+  - Match team objects: 0x00F8F158 + t x 0x43C4, club ID at +0 (0x100 = the user's), +0x43BC raw count, +0x43C0 extension minutes. Only the user's team gets 0x00EE6CF0/6CF4; the opponent keeps its own (鳥取: 4, 0).
+  - New switch 19 MATCH ORDERS INFINITE ($F013): saka_team_skill_hook after both stores gives the use back for the user's team. patches/recompiled-0013-team-skill-unlimited.patch. Not seen in a match: the bench's home side never uses one.
+  - FULL HOUSE now only for the user's match: func_0053D7A8's output r16 == 0x00F99254. The simulated other matches (func_00496998) were made full too before. Bench: "full house 1" per match, where it was 4-9.
+  - Checked as user-only already:
+    - training multipliers: func_00515548 loops over 0x00EE2954 only;
+    - NO SUSPENSION, foreign, satisfaction, negotiation, trade, facilities, interviews;
+    - the data cheats, which write the user's club area.
+  - Red cards: still open. The result 0x00F97B24 is not live; the in-match decision is not found.
+- **Red cards, our team (owner: "우리 팀"), 2026-11-09 midday: not found yet.**
+  - STAT MAX raises only the 19 skills (no rough-play stat).
+  - The match result 0x00F97B24 is not written live.
+  - Memory dumps through SAKA_MEM_DUMP_GATE every 15 s disturb the match: a cutscene at ~123 s, then back to the locker room. So the 11→10 drops found in those dumps are not evidence.
+  - The in-match swap error 4 (この選手は退場処分のため…) is set by the generic menu state machine FUN_003FFBE8, not traced to the flag.
+  - Next: a lighter probe than full dumps (a small range logged by the cheat thread), or the write watch on the team's player copies (+0xFC) during a full match.
+- **Cards found statically (2026-11-09 afternoon, owner: "옐로우나 레드카드가 경기중에 나오지 않게"):** REA Ghidra decomp_all.c, from the result writer back.
+  - The result writer FUN_0020c038 → FUN_0020bb50 copies:
+    - from the match stats table 4 (`FUN_002319d0(core, 4)`): team t player s at data + t*0x668 + 0xC0 + s*0x40. +0x27 = yellows → result +0x19; +0x28 = red → +0x1A;
+    - the player copy's +0xFC status → result +4 (5 = sent off).
+  - The play-sequence hub FUN_001fae14 (table 0x10) takes the current play record (`FUN_00205448(seq, 0)`) and sends record+0x28 to FUN_002151e4 → stats FUN_002d730c.
+  - A foul sub-event at record+0x28 has these fields:
+    - [0] = 9/10;
+    - [0xC] = side of the fouler, [0xD] = fouler;
+    - [8]/[9] = victim side/player;
+    - [0xE] = code (record+0x60).
+  - Code % 3: 0 = no card, 1 = yellow (a second yellow becomes red: FUN_002d6e34), 2 = red. Code / 3 = the kind of foul: 3-5 / 6-8 / 9-11 also injure the victim.
+  - FUN_002dcc48 (from FUN_0020d340 / FUN_0020e03c) counts the card on the fouler: FUN_002d515c = yellow, FUN_002d51c0 = red. When FUN_002d51f4 > 0 it sets status 5 (FUN_002d5204, player copy +0xFC) = sent off.
+  - Where the event is made: the play builder func_00205220 (and func_00205568) clears the new record from a template, then runs the steps (func_0028EC08 …).
+    - func_0028EC08 calls func_0028CA48(…, record+0x28, previous record, previous record+0x223C, …).
+    - That function writes the foul (type 9, or 10 when func_002CE174), the sides and players, and `code = [prev+0x223C + 0xCC]`, the decision carried over from the previous play.
+    - Only then does the builder hand the record to func_00204900 (restart), and from there to the consumers above.
+  - New switch 20 NO CARDS ($F014): saka_no_cards_hook runs right after the build in both builders. A foul by the user's team (side → team as func_002CDA60; match_team_is_user) gets code - code % 3. patches/recompiled-0014-no-cards.patch.
+    - The pending decision upstream only takes effect through this event, so the referee, the scene, the send-off and the records all see no card.
+    - Every foul with a card logs `[nocards] foul type … code … side … period … -> team …`, even with the switch off. The first 64 fouls without a card are logged too.
+  - Bench nc2 (owner's save copy, NO SUSPENSION + NO CARDS, scratchpad matchbench2.ps1, which presses ○ on menus during the match): 3 fouls. One was ours with a yellow (type 9, code 1, side 1, period 1 → team 0): `card removed`, so the counter is 1. The other two (code 0) had no card.
+    - Seen only through the log: the referee's scene and the result screen. The owner's live check is pending.
+    - The bench's ○ presses after half-time stopped in a menu (488 draws), so the second half was short.
+
+## Repository and releases without bat files (2026-11-09, owner: "실행파일까지 깃헙에 올려줘", "리포지토리에 있는 bat파일들은 모두 삭제하거나 숨겨줘. 오직 exe들로만")
+- The .bat files are no longer in the repository (`*.bat` in .gitignore). They stay on this PC for building: build_release.bat, build_launcher.bat, make_release.bat and run*.bat.
+- `tools/make_release.ps1` no longer puts run.bat in the release; the launcher starts the game itself.
+- Releases are on GitHub Releases: one zip with `Sakatsuku Launcher.exe` and `build-release\SakatsukuRecomp.exe` + SDL2.dll, and no game data.

@@ -199,6 +199,7 @@ int saka_logic60_match_skip(void)
 typedef struct { uint32_t key, ptick; float a[3], b[3], c[3], pend[3]; uint8_t n, has_pend; } tick_hist;
 static tick_hist s_anim_hist[256];
 static unsigned long long s_anim_ahead, s_anim_kept, s_ball_ahead, s_ball_kept;
+static unsigned long long s_ball_glide_n; static double s_ball_lag_sum, s_ball_lag_max;   /* drawn behind the game's ball */
 static void th_commit(tick_hist* h, int nc)
 {
     memcpy(h->a, h->b, (size_t)nc * 4u); memcpy(h->b, h->c, (size_t)nc * 4u); memcpy(h->c, h->pend, (size_t)nc * 4u);
@@ -264,9 +265,12 @@ static void saka_anim60_stats(void)
     if (!t0) t0 = now;
     if (now - t0 < 5) return;
     t0 = now;
-    fprintf(stderr, "[anim60] last 5 s: animation times half a step ahead %llu, left %llu; ball %llu ahead, %llu left (not steady)\n",
-            s_anim_ahead, s_anim_kept, s_ball_ahead, s_ball_kept);
-    s_anim_ahead = s_anim_kept = s_ball_ahead = s_ball_kept = 0;
+    fprintf(stderr, "[anim60] last 5 s: animation times half a step ahead %llu, left %llu; ball %llu ahead, %llu left (not steady); "
+            "ball glide %llu calls, behind the game's ball mean %.2f max %.2f\n",
+            s_anim_ahead, s_anim_kept, s_ball_ahead, s_ball_kept, s_ball_glide_n,
+            s_ball_glide_n ? s_ball_lag_sum / (double)s_ball_glide_n : 0.0, s_ball_lag_max);
+    s_anim_ahead = s_anim_kept = s_ball_ahead = s_ball_kept = s_ball_glide_n = 0;
+    s_ball_lag_sum = s_ball_lag_max = 0.0;
 }
 
 /* The 30 Hz match tick sees the engine timer as the original game did: the
@@ -347,18 +351,28 @@ static void ball_high_diag(const float v[3], int moved, const float out[3])
  * left shrinking to a tenth over as many calls as the ball stood (two to six match ticks), so the ball slows
  * down like a pushed ball. When the ball moves on during a glide it shrinks faster (x0.7 a call). Kicks and
  * longer jumps (restarts) are drawn as the game draws them. One call per tick at 60 ticks (m = 2 calls per
- * match tick), one per frame at 30 (m = 1). */
-typedef struct { uint32_t key; float raw[3], drawn[3], off[3], f; unsigned still; int active; } ball_glide_st;
+ * match tick), one per frame at 30 (m = 1).
+ * 2026-11-09 (owner: "공이 선수를 늦게 따라가고 선수들의 움직임 틱에 제대로 붙는 느낌이 아니야"): that glide shrank the
+ * distance exponentially over 4-12 calls, so after every dribble touch the drawn ball trailed the game's ball, and the
+ * player, for up to a fifth of a second. Now a hop is drawn over one match tick: half of it on the call it happens,
+ * the rest on the next call, so from the next frame on the ball is where the game puts it, in step with the players.
+ * At 30 ticks (one call per match tick) nothing is glided. SAKA_BALL_SMOOTH=long = the 2026-11-08 glide (for
+ * comparison), 0 = off. The [anim60] 5-second line counts the glided calls and how far behind they drew the ball. */
+typedef struct { uint32_t key; float raw[3], drawn[3], off[3], f; unsigned still, left; int active; } ball_glide_st;
 static int ball_glide(uint32_t obj, const float raw[3], float v[3])
 {
-    static int on = -1;
+    static int on = -1;   /* 0 off, 1 one match tick (default), 2 the long glide */
     static ball_glide_st g;
     if (on < 0) {
-        const char* e = getenv("SAKA_BALL_SMOOTH"); on = !(e && *e == '0');
-        fprintf(stderr, "[ball] hops of the drawn ball: %s\n", on ? "glided (SAKA_BALL_SMOOTH=0 = as the game draws them)" : "as the game draws them");
+        const char* e = getenv("SAKA_BALL_SMOOTH");
+        on = (e && *e == '0') ? 0 : (e && strcmp(e, "long") == 0) ? 2 : 1;
+        fprintf(stderr, "[ball] hops of the drawn ball: %s\n",
+                on == 1 ? "over one match tick (SAKA_BALL_SMOOTH=long = the long glide, 0 = as the game draws them)"
+                        : on == 2 ? "long glide (SAKA_BALL_SMOOTH=long)" : "as the game draws them");
     }
     if (!on) return 0;
     const unsigned m = ball60_on() ? 2u : 1u;
+    if (on == 1 && m < 2u) return 0;
     if (g.key != obj) { memset(&g, 0, sizeof g); g.key = obj; memcpy(g.raw, raw, 12); memcpy(g.drawn, v, 12); return 0; }
     const float dx = raw[0] - g.raw[0], dy = raw[1] - g.raw[1], dz = raw[2] - g.raw[2];
     const float d = sqrtf(dx * dx + dy * dy + dz * dz);
@@ -366,18 +380,27 @@ static int ball_glide(uint32_t obj, const float raw[3], float v[3])
     else {
         if (d > 15.0f) g.active = 0;                                             /* restart or reset: at once */
         else if (d > 1.0f && raw[1] == 0.0f && g.still >= 2u * m) {             /* a hop after two match ticks */
-            unsigned n = g.still + 1u;
-            if (n < 2u * m) n = 2u * m;
-            if (n > 6u * m) n = 6u * m;
-            g.f = powf(0.1f, 1.0f / (float)n);
+            if (on == 2) {
+                unsigned n = g.still + 1u;
+                if (n < 2u * m) n = 2u * m;
+                if (n > 6u * m) n = 6u * m;
+                g.f = powf(0.1f, 1.0f / (float)n);
+            } else {
+                g.f = 0.5f; g.left = 1u;                                         /* half now, all of it next call */
+            }
             for (int k = 0; k < 3; k++) g.off[k] = g.drawn[k] - v[k];
             g.active = 1;
-        } else if (g.active && g.f > 0.7f) g.f = 0.7f;                          /* moving on: catch up sooner */
+        } else if (g.active && on == 2 && g.f > 0.7f) g.f = 0.7f;              /* moving on: catch up sooner */
         g.still = 0; memcpy(g.raw, raw, 12);
     }
     if (g.active) {
-        for (int k = 0; k < 3; k++) g.off[k] *= g.f;
-        if (g.off[0] * g.off[0] + g.off[1] * g.off[1] + g.off[2] * g.off[2] < 1e-4f) g.active = 0;
+        if (on == 1) {
+            if (g.left) { g.left--; for (int k = 0; k < 3; k++) g.off[k] *= g.f; }
+            else g.active = 0;
+        } else {
+            for (int k = 0; k < 3; k++) g.off[k] *= g.f;
+            if (g.off[0] * g.off[0] + g.off[1] * g.off[1] + g.off[2] * g.off[2] < 1e-4f) g.active = 0;
+        }
     }
     if (!g.active) { memcpy(g.drawn, v, 12); return 0; }
     const float floor_y = fminf(v[1], 0.0f);
@@ -394,6 +417,11 @@ void saka_ball_vec_hook(ppu_context* ctx)
     const float v0[3] = { v[0], v[1], v[2] };
     int moved = ball60_on() ? ball_ahead((uint32_t)ctx->gpr[31], v) : 0;   /* the diagnostic also at 30 ticks */
     moved |= ball_glide((uint32_t)ctx->gpr[31], v0, v);
+    if (moved & 2) {   /* how far behind the game's ball the glide drew it */
+        const float dx = v[0] - v0[0], dy = v[1] - v0[1], dz = v[2] - v0[2];
+        const double lag = sqrt((double)(dx * dx + dy * dy + dz * dz));
+        s_ball_glide_n++; s_ball_lag_sum += lag; if (lag > s_ball_lag_max) s_ball_lag_max = lag;
+    }
     ball_high_diag(v0, moved, v);
     if (!moved) return;
     for (int k = 0; k < 3; k++) { uint32_t w; memcpy(&w, &v[k], 4); w = ball_bs32(w); memcpy(r + 4 * k, &w, 4); }
@@ -895,23 +923,94 @@ void saka_install_syscall_hooks(void)
  *   $0000 addr value      8-bit write ($0100 16-bit, $0200 32-bit)
  *   $4T0x addr value      multi-write (T = 0/1/2: 8/16/32-bit) with the next line,
  *   $CCCC step vstep      CCCC writes, the address +step and the value +vstep each time
- *   $F0nn 0 0             code switch nn: a hook in the recompiled code acts while the
- *                         cheat is on (the Vita ARM code patches, moved; see below)
+ *   $F0nn 0 v             code switch nn: a hook in the recompiled code acts while the
+ *                         cheat is on (the Vita ARM code patches, moved; see below);
+ *                         v is its value for a switch that takes one (7: the points)
  *   $CT00 addr value      the port's own: write only if memory holds a larger value
  *                         ($DT0x + next line: the same as a multi-write), T = 0/1/2
  *   Lines starting with # are comments; "#@..." lines carry the launcher's metadata.
  * Other code types are skipped, the Vita ARM code patches ($A100/$A200) among them:
  * the game's code is recompiled, so its PPC bytes in memory are never run.
  * Writes go only to committed guest memory. SAKA_CHEATS=0 turns the thread off. */
-static volatile uint8_t s_cheat_switch[16];   /* set by the cheat thread from the enabled $F0nn codes */
-static volatile long s_cheat_hook_calls[16];  /* calls of each switch's hook while it is on (logged by the thread) */
+static volatile uint8_t s_cheat_switch[32];   /* set by the cheat thread from the enabled $F0nn codes */
+static volatile long s_cheat_hook_calls[32];  /* calls of each switch's hook while it is on (logged by the thread) */
+/* 2026-11-09 (owner: "고정도 가능하게 해주고 갱신도 가능하게 해서 변경도 가능해야해"): a switch can carry a value
+ * ($F0nn 0 value, replaced through values.txt like a data code's) and 고정 (values.txt "once" 0/1). gen goes up by
+ * one when the switch is turned on, its value or 고정 changes, or 갱신 asks for it (values.txt "refresh"), so a hook
+ * can put the value in once more. */
+static volatile uint32_t s_cheat_switch_value[32];
+static volatile uint8_t s_cheat_switch_lock[32];
+static volatile long s_cheat_switch_gen[32];
+/* The money (0x00EE2844, 만엔) while a locked cheat writes it: the game's three money changers (func_0053F3A0,
+ * func_0053F434, func_00544558) put it back right after their store (saka_money_hook), so a purchase never shows
+ * the lowered amount. Before 2026-11-09 only the cheat thread rewrote it ten times a second, and the HUD (func_00084C38,
+ * redrawn when money changes) kept the amount after the purchase (owner: "돈 마저도 고정이 안돼네"). */
+#define CHEAT_MONEY 0x00EE2844u
+static volatile int s_money_lock;
+static volatile uint32_t s_money_value;
 #ifdef _WIN32
 typedef struct { uint8_t size, lower; uint32_t addr, value, count, step, vstep; } cheat_code;
-typedef struct { char name[128]; int first, n, on, once, done; } cheat_def;
+typedef struct { char name[128]; int first, n, on, once, done; unsigned refresh; } cheat_def;
 static cheat_code s_cheat_codes[4096];
 static cheat_def s_cheat_defs[512];
 static int s_ncheat_codes, s_ncheat_defs, s_cheat_skipped;
 static FILETIME s_cheat_time[5];
+
+/* ---- Per-save settings (2026-11-09, owner: "이런 치트들이 세이브 파일별로 별도로 작동하는 메커니즘을 야구츠쿠3의 치트적용
+ * 관련해서 참고해"; YKTK3 keeps them in cheat_saves/<save>/) ------------------------------------------------------
+ * enabled.txt, values.txt, players.txt and lists.txt are kept per save in cheats/saves/<id>/: "MAIN00".. for the save
+ * slots (BLJM61064-SAVEDATA/MAINnn.DAT is slot nn+1), "new" for a new game not saved yet. At the title (and in its EDIT
+ * mode) the files in cheats/ itself are used. The code list (BLJM61064.txt) is the same for every save.
+ * - Which save: the save data files the game reads and writes (cellSaveData's g_savedata_file_hook). After the title
+ *   (its menu file, main.cpp's file-open hook calls saka_cheats_title), the game that starts is the MAINnn.DAT read
+ *   since, else a new game: one whose roster differs from the one in memory at the title. A new game's settings
+ *   start empty. Saving into another slot makes the game that save, and its settings go with it (copied over).
+ * - The first save used after this change starts from the settings that were in cheats/ (the owner had one save).
+ * - cheats/live/save.txt: "<id>\t<description>" for the launcher and the menu (saka_cheat_profile). */
+static volatile LONG s_save_slot = -2;      /* -2 title, -1 new game, 0.. MAINnn */
+static volatile LONG s_save_read = -2;      /* the MAINnn.DAT read last since the title (-2 none) */
+static volatile LONG s_save_written = -2;   /* a MAINnn.DAT the game wrote, for the cheat thread */
+static volatile LONG s_save_title = 1;      /* at the title, or after it until a game starts */
+static volatile LONG s_save_title_seen;     /* the cheat thread still has to take the title's roster */
+static volatile LONG s_save_gen;            /* +1 on every change of s_save_slot (the F2 menu reloads) */
+static int s_profile_switched;              /* once cheats are written again after a change of save */
+static uint32_t s_title_roster[23];
+
+static void cheat_profile_dir(LONG slot, char* out, size_t n)
+{
+    if (slot == -2) snprintf(out, n, "cheats/");
+    else if (slot == -1) snprintf(out, n, "cheats/saves/new/");
+    else snprintf(out, n, "cheats/saves/MAIN%02ld/", (long)slot);
+}
+static const char* cheat_path(const char* name)   /* the cheat thread's own buffer */
+{
+    static char buf[96];
+    char dir[64];
+    cheat_profile_dir(s_save_slot, dir, sizeof dir);
+    snprintf(buf, sizeof buf, "%s%s", dir, name);
+    return buf;
+}
+static void cheat_profile_desc(LONG slot, char* out, size_t n)
+{
+    if (slot == -2) snprintf(out, n, "타이틀·에디트 (공통 설정)");
+    else if (slot == -1) snprintf(out, n, "새 게임 (아직 저장 안 함)");
+    else snprintf(out, n, "세이브 %ld (MAIN%02ld.DAT)", (long)slot + 1, (long)slot);
+}
+static const char* const s_profile_files[4] = { "enabled.txt", "values.txt", "players.txt", "lists.txt" };
+static void cheat_profile_copy(LONG from, LONG to, int only_missing)
+{
+    char a[64], b[64], fa[96], fb[96];
+    cheat_profile_dir(from, a, sizeof a);
+    cheat_profile_dir(to, b, sizeof b);
+    CreateDirectoryA("cheats/saves", NULL);
+    { char d[64]; snprintf(d, sizeof d, "%s", b); d[strlen(d) - 1] = 0; CreateDirectoryA(d, NULL); }
+    for (int i = 0; i < 4; i++) {
+        snprintf(fa, sizeof fa, "%s%s", a, s_profile_files[i]);
+        snprintf(fb, sizeof fb, "%s%s", b, s_profile_files[i]);
+        if (GetFileAttributesA(fa) == INVALID_FILE_ATTRIBUTES) { if (!only_missing) DeleteFileA(fb); continue; }
+        CopyFileA(fa, fb, only_missing ? TRUE : FALSE);
+    }
+}
 
 static void cheat_trim(char* s)
 {
@@ -944,6 +1043,7 @@ static void cheats_load(void)
             snprintf(c->name, sizeof c->name, "%s", cheat_skip_space(s + 3));
             c->first = s_ncheat_codes;
             c->n = c->on = c->once = c->done = 0;
+            c->refresh = 0;
             multi = -1;
             continue;
         }
@@ -956,9 +1056,9 @@ static void cheats_load(void)
             continue;
         }
         const unsigned kind = type >> 12, bits = (type >> 8) & 0xFu;
-        if (kind == 0xF && s_ncheat_codes < 4096) {   /* code switch: size 0, addr = switch number */
+        if (kind == 0xF && s_ncheat_codes < 4096) {   /* code switch: size 0, addr = switch number, value = its value */
             cheat_code* k = &s_cheat_codes[s_ncheat_codes++];
-            k->size = 0; k->lower = 0; k->addr = type & 0xFFu; k->value = 0; k->count = 0; k->step = k->vstep = 0;
+            k->size = 0; k->lower = 0; k->addr = type & 0xFFu; k->value = v; k->count = 0; k->step = k->vstep = 0;
             s_cheat_defs[s_ncheat_defs - 1].n++;
             continue;
         }
@@ -979,7 +1079,7 @@ static void cheats_load(void)
 static void cheats_enable(void)
 {
     for (int i = 0; i < s_ncheat_defs; i++) s_cheat_defs[i].on = 0;
-    FILE* f = fopen("cheats/enabled.txt", "rb");
+    FILE* f = fopen(cheat_path("enabled.txt"), "rb");
     if (!f) return;
     char line[256];
     while (fgets(line, sizeof line, f)) {
@@ -1025,7 +1125,7 @@ static uint32_t cheat_number(const char* s)
 
 static void cheats_values(void)
 {
-    FILE* f = fopen("cheats/values.txt", "rb");
+    FILE* f = fopen(cheat_path("values.txt"), "rb");
     if (!f) return;
     char line[512];
     while (fgets(line, sizeof line, f)) {
@@ -1041,19 +1141,38 @@ static void cheats_values(void)
             cheat_def* d = &s_cheat_defs[i];
             if (strcmp(d->name, name) != 0) continue;
             if (strcmp(key, "once") == 0) { d->once = atoi(val) != 0; continue; }
+            if (strcmp(key, "refresh") == 0) { d->refresh = (unsigned)strtoul(val, NULL, 10); continue; }   /* 갱신 */
             const int n = atoi(key);
-            /* the n-th code of the cheat (codes are stored one per $ line except a multi-write's second line) */
-            if (n >= 0 && n < d->n && s_cheat_codes[d->first + n].size) s_cheat_codes[d->first + n].value = cheat_number(val);
+            /* the n-th code of the cheat (codes are stored one per $ line except a multi-write's second line; a code
+             * switch's value too) */
+            if (n >= 0 && n < d->n) s_cheat_codes[d->first + n].value = cheat_number(val);
         }
     }
     fclose(f);
 }
 
+/* Per-player multipliers (2026-11-09, owner: "이것도 선수별로 개별로도 가능하게 해주고. 팀의 선수 리스트에서 선수를
+ * 선택하면 ... 중복이나 이런 문제가 발생할수 있는것에 대한 방지 대책도"): players.txt fields xt (normal training), xs
+ * (special training and 秘蔵っ子), xa (awakening points), 1-100. The hooks of switches 12-14 find the player from the
+ * record they get (the club's 23 or the youth team's 15) and use his own value instead of the switch's:
+ * - never both multiplied, and his value works with the switch off too;
+ * - one value per player and kind (a later line for the same player and kind replaces the earlier one);
+ * - a player who left the club and its youth team matches no record, so his line does nothing (it works again if he
+ *   comes back);
+ * - the awakening points at the end of an SP plan get the larger of the special and the awakening multiplier, not
+ *   both multiplied (saka_sp_awake_mult_hook / saka_awake_mult_hook).
+ * Two tables: players.txt is read into the one not in use, then they are swapped, so a hook never sees half of one. */
+typedef struct { uint32_t id; uint8_t m[3]; } cheat_player_mult;   /* m: training, special, awakening; 0 = none */
+static cheat_player_mult s_pmult[2][128];
+static volatile int s_pmult_n[2], s_pmult_cur;
+
 static void cheats_players_load(void)
 {
     s_ncheat_players = 0;
-    FILE* f = fopen("cheats/players.txt", "rb");
-    if (!f) return;
+    const int nb = !s_pmult_cur;
+    int nm = 0;
+    FILE* f = fopen(cheat_path("players.txt"), "rb");
+    if (!f) { s_pmult_n[nb] = 0; s_pmult_cur = nb; return; }
     char line[256];
     while (fgets(line, sizeof line, f) && s_ncheat_players < 2048) {
         cheat_trim(line);
@@ -1064,6 +1183,22 @@ static void cheats_players_load(void)
         if (sscanf(s, "%u\t%31[^\t]\t%31[^\t]\t%u", &id, field, value, &lock) < 3) continue;
         cheat_player_edit* e = &s_cheat_players[s_ncheat_players];
         e->id = id; e->kind = field[0]; e->value = cheat_number(value); e->lock = lock != 0; e->done = 0;
+        if (field[0] == 'x') {   /* a per-player multiplier, not a write */
+            static const char kinds[] = "tsa";
+            const char* k = field[1] ? strchr(kinds, field[1]) : NULL;
+            if (!k || field[2]) continue;
+            const unsigned long v = strtoul(value, NULL, 10);
+            int j = 0;
+            while (j < nm && s_pmult[nb][j].id != id) j++;
+            if (j == nm) {
+                if (nm >= 128) continue;
+                s_pmult[nb][j].id = id;
+                memset(s_pmult[nb][j].m, 0, sizeof s_pmult[nb][j].m);
+                nm++;
+            }
+            s_pmult[nb][j].m[k - kinds] = (uint8_t)(v < 1 ? 0 : v > 100 ? 100 : v);
+            continue;
+        }
         if (e->kind == 'a' || e->kind == 'l') {
             const unsigned n = (unsigned)atoi(field + 1);
             if (n >= 46) continue;
@@ -1078,6 +1213,8 @@ static void cheats_players_load(void)
         s_ncheat_players++;
     }
     fclose(f);
+    s_pmult_n[nb] = nm;
+    s_pmult_cur = nb;
 }
 
 /* A game is loaded: the user's club roster holds at least one valid player ID (0 < id < 0x46A2, or the game's
@@ -1109,8 +1246,8 @@ static void cheats_players_apply(int loaded)
     for (int i = 0; i < s_ncheat_players; i++) {
         cheat_player_edit* e = &s_cheat_players[i];
         if (!e->lock && e->done) continue;
-        for (uint32_t k = 0; k < 23; k++) {
-            const uint32_t rec = CHEAT_ROSTER + k * CHEAT_RECORD;
+        for (uint32_t k = 0; k < 23 + 15; k++) {   /* the club's 23, then its youth team's 15 (0x00EE86E0, 2026-11-09) */
+            const uint32_t rec = k < 23 ? CHEAT_ROSTER + k * CHEAT_RECORD : 0x00EE86E0u + (k - 23) * CHEAT_RECORD;
             if (ld_be32(rec) != e->id) continue;
             uint8_t* p = vm_base + rec;
             if (e->kind == 'a') {
@@ -1146,7 +1283,7 @@ static int s_ncheat_lists;
 static void cheats_lists_load(void)
 {
     s_ncheat_lists = 0;
-    FILE* f = fopen("cheats/lists.txt", "rb");
+    FILE* f = fopen(cheat_path("lists.txt"), "rb");
     if (!f) return;
     char line[256];
     while (fgets(line, sizeof line, f) && s_ncheat_lists < 64) {
@@ -1161,6 +1298,38 @@ static void cheats_lists_load(void)
         e->list = c; e->slot = (uint8_t)slot; e->id = id; e->lock = lock != 0; e->done = 0;
     }
     fclose(f);
+}
+
+/* The overseas status records (500 x 12 at 0x00F0C4B8: +0 player ID, +4 age, +5 1-4, +8 flags) are a fixed pool
+ * that is normally full (the owner's save: 500 of 500). When the game puts a player in the European list and he has no
+ * record, func_0052DEFC takes a free one, else the highest one whose player is neither in the European list (20 x 0x14
+ * at 0x00EE70E8) nor in the list at 0x00EE7340 (20 x 0x30), and starts it anew. The same rule here, also skipping the
+ * players the cheat itself puts in the list. (2026-11-09, owner: "빈 칸: 게임의 해외 선수 기록 500칸이 다 차서 … 이걸
+ * 좀 해결해야하는데") */
+static int cheat_euro_spare_record(void)
+{
+    for (int r = 499; r >= 0; r--) {
+        const uint32_t id = ld_be32(0x00F0C4B8u + 0xCu * (uint32_t)r);
+        if (id == 0) return r;
+        int used = 0;
+        for (uint32_t k = 0; k < 20 && !used; k++)
+            used = ld_be32(0x00EE70E8u + 0x14u * k) == id || ld_be32(0x00EE7340u + 0x30u * k) == id;
+        for (int i = 0; i < s_ncheat_lists && !used; i++)
+            used = s_cheat_lists[i].list == 'e' && s_cheat_lists[i].id == id;
+        if (!used) return r;
+    }
+    return -1;
+}
+/* A player's base age (player master +0x10: table 1 below ID 10000, table 2 above; func_004CA1E4), 16-45. */
+static uint8_t cheat_player_base_age(uint32_t id)
+{
+    const uint32_t h1 = ld_be32(0x008D4A9Cu + 4u), h2 = ld_be32(0x008D4A9Cu + 8u);
+    if (!cheat_committed(h1, 8) || !cheat_committed(h2, 8)) return 20;
+    const uint32_t n1 = ld_be32(h1);
+    const uint32_t m = id < n1 ? ld_be32(h1 + 4) + id * 0x3Cu : ld_be32(h2 + 4) + (id - n1) * 0x3Cu;
+    if (!cheat_committed(m, 0x3C)) return 20;
+    const uint8_t a = vm_base[m + 0x10];
+    return a < 16 ? 16 : a > 45 ? 45 : a;
 }
 
 static void cheats_lists_apply(int loaded)
@@ -1178,6 +1347,10 @@ static void cheats_lists_apply(int loaded)
         const uint32_t ea = 0x00EE70E8u + 0x14u * e->slot;
         const uint32_t old = ld_be32(ea);
         if (old == e->id) continue;
+        int twice = 0;   /* already in another slot: the game never lists a player twice (func_0052E190) */
+        for (uint32_t k = 0; k < 20 && !twice; k++)
+            twice = k != e->slot && ld_be32(0x00EE70E8u + 0x14u * k) == e->id;
+        if (twice) continue;
         int have = -1, from = -1, free_ = -1;
         for (int r = 0; r < 500; r++) {
             const uint32_t id = ld_be32(0x00F0C4B8u + 0xCu * (uint32_t)r);
@@ -1185,10 +1358,29 @@ static void cheats_lists_apply(int loaded)
             else if (old && id == old && from < 0) from = r;
             else if (id == 0 && free_ < 0) free_ = r;
         }
+        int rec_given = -1;
         if (have < 0) {
-            const int r = from >= 0 ? from : free_;
+            int r = from >= 0 ? from : free_;
+            if (r < 0) r = cheat_euro_spare_record();   /* 2026-11-09: as the game does when all 500 are used */
             if (r < 0) continue;   /* no record to give the player: leave the list as it is */
-            st_be32(0x00F0C4B8u + 0xCu * (uint32_t)r, e->id);
+            rec_given = r;
+        }
+        const uint8_t age = cheat_player_base_age(e->id);
+        if (rec_given >= 0) {
+            const uint32_t rec = 0x00F0C4B8u + 0xCu * (uint32_t)rec_given;
+            if (rec_given != from) {   /* another player's record: started the way func_0052DEFC starts one */
+                memset(vm_base + rec, 0, 12);
+                vm_base[rec + 5] = (uint8_t)(1 + e->id % 4u);
+            }
+            vm_base[rec + 4] = age;
+            st_be32(rec, e->id);
+        }
+        if (!old) {   /* an empty slot: the entry as func_0052E190 writes one (+4 = 2, +5 = the age, the rest 0) */
+            memset(vm_base + ea + 4, 0, 0x10);
+            vm_base[ea + 4] = 2;
+            vm_base[ea + 5] = have >= 0 ? vm_base[0x00F0C4B8u + 0xCu * (uint32_t)have + 4] : age;
+        } else if (rec_given >= 0) {
+            vm_base[ea + 5] = age;   /* the new player's age, not the old one's */
         }
         st_be32(ea, e->id);
     }
@@ -1234,12 +1426,38 @@ static void cheats_export(int loaded)
 
 static void cheats_apply(void)
 {
-    uint8_t sw[16] = { 0 };
+    uint8_t sw[32] = { 0 }, lk[32] = { 0 };
+    uint32_t val[32] = { 0 }, ref[32] = { 0 };
     for (int i = 0; i < s_ncheat_defs; i++)
         if (s_cheat_defs[i].on)
             for (int c = s_cheat_defs[i].first; c < s_cheat_defs[i].first + s_cheat_defs[i].n; c++)
-                if (s_cheat_codes[c].size == 0 && s_cheat_codes[c].addr < 16) sw[s_cheat_codes[c].addr] = 1;
-    for (int i = 0; i < 16; i++) s_cheat_switch[i] = sw[i];
+                if (s_cheat_codes[c].size == 0 && s_cheat_codes[c].addr < 32) {
+                    const uint32_t a = s_cheat_codes[c].addr;
+                    sw[a] = 1;
+                    val[a] = s_cheat_codes[c].value;
+                    lk[a] = !s_cheat_defs[i].once;
+                    ref[a] = s_cheat_defs[i].refresh;
+                }
+    static uint8_t last_sw[32], last_lk[32];
+    static uint32_t last_val[32], last_ref[32];
+    for (int i = 0; i < 32; i++) {
+        s_cheat_switch_value[i] = val[i];
+        s_cheat_switch_lock[i] = lk[i];
+        if (sw[i] && (!last_sw[i] || val[i] != last_val[i] || lk[i] != last_lk[i] || ref[i] != last_ref[i]))
+            s_cheat_switch_gen[i]++;   /* turned on, a new value or 고정, or 갱신 */
+        last_sw[i] = sw[i]; last_lk[i] = lk[i]; last_val[i] = val[i]; last_ref[i] = ref[i];
+        s_cheat_switch[i] = sw[i];
+    }
+    int money = 0;
+    uint32_t money_value = 0;
+    for (int i = 0; i < s_ncheat_defs && !money; i++)
+        if (s_cheat_defs[i].on && !s_cheat_defs[i].once)
+            for (int c = s_cheat_defs[i].first; c < s_cheat_defs[i].first + s_cheat_defs[i].n; c++) {
+                const cheat_code* k = &s_cheat_codes[c];
+                if (k->size == 4 && k->addr == CHEAT_MONEY && k->count && !k->lower) { money = 1; money_value = k->value; break; }
+            }
+    s_money_value = money_value;
+    s_money_lock = money;
     int loaded = -1;
     for (int i = 0; i < s_ncheat_defs; i++) {
         if (!s_cheat_defs[i].on) continue;
@@ -1268,6 +1486,116 @@ static void cheats_apply(void)
     }
 }
 
+/* A once cheat (고정 off) is written again only when it is turned on, its values or 고정 change, or 갱신 asks for it
+ * (values.txt "refresh"); the others keep "done" over a reload. Before 2026-11-09 any change of the three files wrote
+ * every once cheat again, so turning one cheat on put the others' values back too. */
+static uint32_t cheat_sig(const cheat_def* d)
+{
+    uint32_t h = 2166136261u;
+    for (int c = d->first; c < d->first + d->n; c++) {
+        const cheat_code* k = &s_cheat_codes[c];
+        const uint32_t w[6] = { k->addr, k->value, k->count, k->step, k->vstep, (uint32_t)k->size << 8 | k->lower };
+        for (int j = 0; j < 6; j++) h = (h ^ w[j]) * 16777619u;
+    }
+    const uint32_t s[3] = { (uint32_t)d->on, (uint32_t)d->once, d->refresh };
+    for (int j = 0; j < 3; j++) h = (h ^ s[j]) * 16777619u;
+    return h;
+}
+
+static void cheats_reload(void)
+{
+    static char names[512][128];
+    static uint32_t sigs[512];
+    static int done[512];
+    const int n = s_ncheat_defs;
+    for (int i = 0; i < n; i++) {
+        memcpy(names[i], s_cheat_defs[i].name, sizeof names[i]);
+        sigs[i] = cheat_sig(&s_cheat_defs[i]);
+        done[i] = s_cheat_defs[i].done;
+    }
+    cheats_load();
+    cheats_enable();
+    cheats_values();
+    const int keep = !s_profile_switched;
+    s_profile_switched = 0;
+    for (int i = 0; i < s_ncheat_defs && keep; i++) {
+        cheat_def* d = &s_cheat_defs[i];
+        for (int j = 0; j < n; j++)
+            if (strcmp(names[j], d->name) == 0) {
+                if (sigs[j] == cheat_sig(d)) d->done = done[j];
+                break;
+            }
+    }
+}
+
+/* Which save's settings are in use (see "Per-save settings"); called by the cheat thread once a second. */
+static void cheat_profile_tick(void)
+{
+    const int loaded = cheat_game_loaded();
+    LONG slot = s_save_slot;
+    if (InterlockedExchange(&s_save_title_seen, 0)) {   /* the title: its roster in memory, to tell a new game */
+        for (uint32_t k = 0; k < 23; k++)
+            s_title_roster[k] = cheat_committed(CHEAT_ROSTER, 23 * CHEAT_RECORD) ? ld_be32(CHEAT_ROSTER + k * CHEAT_RECORD) : 0;
+        slot = -2;
+    }
+    if (s_save_title) {
+        int differs = 0;
+        for (uint32_t k = 0; k < 23 && loaded; k++)
+            differs |= ld_be32(CHEAT_ROSTER + k * CHEAT_RECORD) != s_title_roster[k];
+        const LONG read = s_save_read;
+        if (loaded && read >= 0 && differs) { slot = read; InterlockedExchange(&s_save_title, 0); }   /* a save loaded */
+        else if (loaded && differs) {                                                                 /* a new game */
+            slot = -1;
+            InterlockedExchange(&s_save_title, 0);
+            for (int i = 0; i < 4; i++) {
+                char f[96];
+                snprintf(f, sizeof f, "cheats/saves/new/%s", s_profile_files[i]);
+                DeleteFileA(f);
+            }
+        }
+    } else {
+        const LONG read = InterlockedExchange(&s_save_read, -2);
+        if (read >= 0 && loaded) slot = read;   /* another save loaded in the game */
+    }
+    const LONG written = InterlockedExchange(&s_save_written, -2);
+    if (written >= 0 && slot != -2 && written != slot) {   /* saved as another slot: the settings go with the game */
+        cheat_profile_copy(slot, written, 0);
+        slot = written;
+    }
+    if (slot == s_save_slot) return;
+    if (slot >= 0 && GetFileAttributesA("cheats/saves/from_cheats.txt") == INVALID_FILE_ATTRIBUTES) {
+        /* the first save used: the settings that were in cheats/ (before they were per save) go with it */
+        cheat_profile_copy(-2, slot, 1);
+        FILE* m = fopen("cheats/saves/from_cheats.txt", "wb");
+        if (m) {
+            fprintf(m, "MAIN%02ld\n", (long)slot);
+            fclose(m);
+        }
+    }
+    if (slot >= -1) {
+        char d[64];
+        cheat_profile_dir(slot, d, sizeof d);
+        CreateDirectoryA("cheats/saves", NULL);
+        d[strlen(d) - 1] = 0;
+        CreateDirectoryA(d, NULL);
+    }
+    InterlockedExchange(&s_save_slot, slot);
+    InterlockedIncrement(&s_save_gen);
+    s_profile_switched = 1;
+    memset(&s_cheat_time[1], 0, sizeof(FILETIME) * 4);   /* the four files are read again from the new place */
+    char desc[96];
+    cheat_profile_desc(slot, desc, sizeof desc);
+    CreateDirectoryA("cheats/live", NULL);
+    FILE* f = fopen("cheats/live/save.txt", "wb");
+    if (f) {
+        if (slot == -2) fprintf(f, "\t%s\n", desc);
+        else if (slot == -1) fprintf(f, "new\t%s\n", desc);
+        else fprintf(f, "MAIN%02ld\t%s\n", (long)slot, desc);
+        fclose(f);
+    }
+    fprintf(stderr, "[cheats] settings of: %s\n", desc);
+}
+
 static int cheat_file_changed(const char* path, FILETIME* last)
 {
     WIN32_FILE_ATTRIBUTE_DATA a;
@@ -1278,31 +1606,51 @@ static int cheat_file_changed(const char* path, FILETIME* last)
     return 1;
 }
 
+/* SAKA_CARD_LOG=1 (diagnostic, 2026-11-09, red cards): the match result 0x00F97B24 (func_004A206C's param 2), two
+ * teams of 0x37C from +0x604 (club ID), 23 players of 0x24 from +0x60C (ID), +0x620 goals, +0x625 yellows, +0x626 red:
+ * every change is logged with the match tick, to find when and where the game writes them. */
+static void card_log_tick(void)
+{
+    static int on = -1;
+    static uint8_t last[2][23][3];
+    if (on < 0) { const char* e = getenv("SAKA_CARD_LOG"); on = e && *e == '1'; }
+    if (!on || !cheat_committed(0x00F97B24u, 0x604u + 2u * 0x37Cu)) return;
+    for (uint32_t tm = 0; tm < 2; tm++)
+        for (uint32_t s = 0; s < 23; s++) {
+            const uint32_t e = 0x00F97B24u + tm * 0x37Cu + s * 0x24u;
+            const uint8_t now[3] = { vm_base[e + 0x620u], vm_base[e + 0x625u], vm_base[e + 0x626u] };
+            if (memcmp(now, last[tm][s], 3) == 0) continue;
+            memcpy(last[tm][s], now, 3);
+            fprintf(stderr, "[cards] match tick %u team %u club %u slot %u id %u goals %u yellows %u red %u (entry 0x%08X)\n",
+                    s_sim_ticks, tm, ld_be32(0x00F97B24u + 0x604u + tm * 0x37Cu), s, ld_be32(e + 0x60Cu), now[0], now[1], now[2], e);
+        }
+}
+
 static DWORD WINAPI cheat_thread(LPVOID arg)
 {
     (void)arg;
     for (unsigned tick = 0;; tick++) {
         Sleep(100);
         if (!vm_base) continue;
+        card_log_tick();
         if (tick % 10 == 0) {
+            cheat_profile_tick();
             const int a = cheat_file_changed("cheats/BLJM61064.txt", &s_cheat_time[0]);
-            const int b = cheat_file_changed("cheats/enabled.txt", &s_cheat_time[1]);
-            const int c = cheat_file_changed("cheats/values.txt", &s_cheat_time[2]);
+            const int b = cheat_file_changed(cheat_path("enabled.txt"), &s_cheat_time[1]);
+            const int c = cheat_file_changed(cheat_path("values.txt"), &s_cheat_time[2]);
             if (a || b || c) {
-                cheats_load();
-                cheats_enable();
-                cheats_values();
+                cheats_reload();
                 int on = 0, once = 0;
                 for (int i = 0; i < s_ncheat_defs; i++) { on += s_cheat_defs[i].on; once += s_cheat_defs[i].on && s_cheat_defs[i].once; }
                 if (s_ncheat_defs)
                     fprintf(stderr, "[cheats] %d cheats, %d on (%d once); %d codes, %d skipped (not data writes)\n",
                             s_ncheat_defs, on, once, s_ncheat_codes, s_cheat_skipped);
             }
-            if (cheat_file_changed("cheats/players.txt", &s_cheat_time[3])) {
+            if (cheat_file_changed(cheat_path("players.txt"), &s_cheat_time[3])) {
                 cheats_players_load();
                 fprintf(stderr, "[cheats] %d player edits\n", s_ncheat_players);
             }
-            if (cheat_file_changed("cheats/lists.txt", &s_cheat_time[4])) {
+            if (cheat_file_changed(cheat_path("lists.txt"), &s_cheat_time[4])) {
                 cheats_lists_load();
                 fprintf(stderr, "[cheats] %d list edits\n", s_ncheat_lists);
             }
@@ -1314,21 +1662,54 @@ static DWORD WINAPI cheat_thread(LPVOID arg)
             cheats_lists_apply(loaded);
             if (tick % 20 == 0) cheats_export(loaded);
         }
-        static long shown[16];
+        static long shown[32];
         if (tick % 100 == 0 && memcmp(shown, (const void*)s_cheat_hook_calls, sizeof shown) != 0) {
-            for (int i = 0; i < 16; i++) shown[i] = s_cheat_hook_calls[i];
+            for (int i = 0; i < 32; i++) shown[i] = s_cheat_hook_calls[i];
             fprintf(stderr, "[cheats] code switches used: youth visit %ld, trade chance %ld, foreign slots %ld, "
-                            "hizo roll %ld, facility check %ld, facility 1 week %ld, edit points %ld, substitution %ld\n",
-                    shown[1], shown[2], shown[3], shown[4], shown[5], shown[6], shown[7], shown[8]);
+                            "hizo roll %ld, facility check %ld, facility 1 week %ld, edit points %ld, substitution %ld, "
+                            "interview %ld, course any %ld, slot keep %ld, training x %ld, special x %ld, awakening x %ld, "
+                            "negotiation %ld, full house %ld, satisfaction %ld, suspensions lifted %ld, team skill uses given back %ld, cards removed %ld, per-player x %ld\n",
+                    shown[1], shown[2], shown[3], shown[4], shown[5], shown[6], shown[7], shown[8], shown[9],
+                    shown[10], shown[11], shown[12], shown[13], shown[14], shown[15], shown[16], shown[17], shown[18], shown[19], shown[20], shown[31]);
         }
     }
     return 0;
+}
+
+/* cellSaveData's view of the save files (ps3recomp libs/system/cellSaveData.c): MAINnn.DAT read = a load, written = a
+ * save (CELL_SAVEDATA_FILEOP_WRITE 1, WRITE_NOTRUNC 3). MAINIDX.DAT and SYSTEM.DAT are not saves. */
+extern void (*g_savedata_file_hook)(const char* dir, const char* file, unsigned op, int result);
+static void saka_savedata_file(const char* dir, const char* file, unsigned op, int result)
+{
+    unsigned n = 100;
+    char tail[8] = "";
+    if (result < 0 || !dir || !file || strncmp(dir, "BLJM61064", 9) != 0) return;
+    if (sscanf(file, "MAIN%2u%7s", &n, tail) != 2 || n > 99 || strcmp(tail, ".DAT") != 0) return;
+    if (op == 0) InterlockedExchange(&s_save_read, (LONG)n);
+    else if (op == 1 || op == 3) InterlockedExchange(&s_save_written, (LONG)n);
+}
+/* main.cpp's file-open hook: the title's menu file was opened (the title or its menu is showing). */
+void saka_cheats_title(void)
+{
+    InterlockedExchange(&s_save_title, 1);
+    InterlockedExchange(&s_save_read, -2);
+    InterlockedExchange(&s_save_title_seen, 1);
+}
+/* For the F2 menu (saka_overlay.cpp): the folder of the settings in use ("cheats/" or "cheats/saves/MAIN00/"), its
+ * description, and a generation that changes with it. */
+long saka_cheat_profile(char* dir, size_t dir_n, char* desc, size_t desc_n)
+{
+    const LONG slot = s_save_slot;
+    if (dir) cheat_profile_dir(slot, dir, dir_n);
+    if (desc) cheat_profile_desc(slot, desc, desc_n);
+    return (long)s_save_gen;
 }
 
 static void saka_cheats_start(void)
 {
     const char* e = getenv("SAKA_CHEATS");
     if (e && *e == '0') return;
+    g_savedata_file_hook = saka_savedata_file;
     HANDLE t = CreateThread(NULL, 0, cheat_thread, NULL, 0, NULL);
     if (t) CloseHandle(t);
 }
@@ -1378,6 +1759,113 @@ void saka_foreign_hook(ppu_context* ctx)
         if ((int32_t)ld_be32(ea) < 23) st_be32(ea, 23);
     }
 }
+/* 3 also the lineup (2026-11-09, owner: "외국인 선수 정원초과도 제발 해결해주고"; the formation screen said 외국인 선수
+ *   정원 초과): func_005864DC counts the foreign players among the starting 11 and the 7 substitutes against the league's
+ *   rules (func_0057F700: +4 foreign, +8 Asian, +0xC special) and returns 0 when there are too many; its only caller
+ *   func_00633E50 then returns 3, and the team menus (before a match FUN_0038A7E0 / FUN_00432FCC, the team's
+ *   FUN_0042973C) show 外国籍選手枠をオーバーしています and do not take the lineup. Hook at its return: 1. Those menus
+ *   are the user's club's only. */
+void saka_foreign_lineup_hook(ppu_context* ctx)
+{
+    if (s_cheat_switch[3] && (int32_t)ctx->gpr[3] == 0) { ctx->gpr[3] = 1; s_cheat_hook_calls[3]++; }
+}
+/* 17 SATISFACTION S (2026-11-09, owner: "경기 후 만족도도 S로 잘 작동하다가 잘 먹히지 않에"; there was no cheat for it,
+ *   the S grades came from the game): func_00541640 (from func_00576DA0 after the user's match; the result at
+ *   0x00F99290) grades the supporters' survey 1-6 (E D C B A S): match content (func_00541270, r31), players (the best
+ *   player's rating, r29), facilities (the built facilities' satisfaction, r30), promotion (the promotions run, r27).
+ *   The overall grade is their average, and the supporters gained are computed from them. Hook after func_0053D558,
+ *   before the grades are used: all four 6, so the overall is S and the supporters gained are the S ones. */
+void saka_satisfaction_hook(ppu_context* ctx)
+{
+    if (!s_cheat_switch[17]) return;
+    ctx->gpr[27] = ctx->gpr[29] = ctx->gpr[30] = ctx->gpr[31] = 6;
+    s_cheat_hook_calls[17]++;
+}
+
+/* 18 NO SUSPENSION (2026-11-09, owner: "레드카드를 받거나 옐로우가 누적되어서 출장이 불가능해지지 않도록 해줘"):
+ *   func_004A206C records each match per competition and player, 5 bytes (games, goals, assists, rating, cards) in the
+ *   competition records (league 0x00F0FB78 + c x 0x2EA4, the others from 0x00F359CC; +0x22E8 + team x 0x73 +
+ *   slot x 5). The cards byte: 0x80 = suspended for the next match (a red card, or two yellows in one match), low 7 bits
+ *   = the yellows collected; at the competition's limit (2 or 4) the player misses the next match.
+ *   func_0049D020 (who can play: +0xFC of the team's player copies, 2 starter / 1 substitute / 0 not) asks
+ *   func_00572524(competition, club, slot) for that record. Hook at its return: for the user's club (func_0049578C:
+ *   0x100 or the club ID at 0x00EE28AC, noted at the entry) the cards byte is cleared, so nobody of the club is
+ *   suspended and no yellows collect; suspensions already given are lifted the same way. 0x00EE1700 is the game's
+ *   empty record for a player it does not find: left alone. */
+static int s_cards_mine;
+void saka_cards_entry_hook(ppu_context* ctx)   /* func_00572524 entry: r4 = club */
+{
+    const uint32_t club = (uint32_t)ctx->gpr[4];
+    s_cards_mine = club != 0 && (club == 0x100u || club == ld_be32(0x00EE28ACu));
+}
+void saka_cards_hook(ppu_context* ctx)   /* func_00572524 return: r3 = the 5-byte record */
+{
+    const uint32_t rec = (uint32_t)ctx->gpr[3];
+    if (!s_cheat_switch[18] || !s_cards_mine || !rec || rec == 0x00EE1700u) return;
+    if (vm_base[rec + 4]) { vm_base[rec + 4] = 0; s_cheat_hook_calls[18]++; }
+}
+
+/* 19 TEAM SKILL UNLIMITED (2026-11-09, owner: "게이지 무한 유지와 시도개수 무한"; REA Ghidra and bench dumps):
+ *   the match's 試合指示 manager keeps per team t (0 home, 1 away; 0x28 apart) the uses left at +0x2C914 (set at kick-off
+ *   by func_002361EC from the team's maximum: the user's is u32 0x00EE6CF0 capped at 6), and per instruction slot a state
+ *   at +0x2C918 (4 just used, 1 running, 3 over) and its time at +0x2C91C (func_0023A158 copies the match engine's).
+ *   Both ways of using one take one use: func_00239E78 and func_0023A6E8 (state 4). Hook after each store: for the
+ *   user's team the use is given back. Team t is the user's when the match team object 0x00F8F158 + t x 0x43C4 starts
+ *   with the user's club (0x100 or u32 0x00EE28AC, as func_0049578C); the other team keeps its count. The effect time
+ *   is the team object's +0x43C0 (minutes added, u32 0x00EE6CF4: MATCH ORDERS sets 90). */
+static int match_team_is_user(uint32_t t)
+{
+    if (t > 1u) return 0;
+    const uint32_t club = ld_be32(0x00F8F158u + t * 0x43C4u);
+    return club != 0 && (club == 0x100u || club == ld_be32(0x00EE28ACu));
+}
+void saka_team_skill_hook(uint32_t count_ea, uint32_t team)
+{
+    if (!s_cheat_switch[19] || !match_team_is_user(team)) return;
+    st_be32(count_ea, ld_be32(count_ea) + 1u);
+    s_cheat_hook_calls[19]++;
+}
+
+/* 20 NO CARDS (2026-11-09, owner: "플레이어의 팀에 옐로우나 레드카드가 경기중에 나오지 않게"; REA Ghidra, NOTES.md
+ *   "Cards found statically"): the match builds each play record (0x38D8 bytes) in func_00205220 (or func_00205568)
+ *   from the previous one; func_0028EC08 → func_0028CA48 writes the play's event at record+0x28. A foul is type 9/10
+ *   (11 a variant): +0x2C period, +0x58 the fouler's side, +0x5C the fouler, +0x48/+0x4C the victim, +0x60 the
+ *   referee's code (taken from the previous play's pending decision): code % 3 = 0 no card, 1 yellow (a second one
+ *   is red), 2 red; code / 3 = the kind of foul (3-11 also hurt the victim). Every reader comes after this point:
+ *   func_00204900 (restart), func_002DCC48 (cards on the player, status 5 = sent off), func_002D730C (match stats →
+ *   the result's +0x19 / +0x1A), the card scene. Hook right after the record is built, before func_00204900: on the
+ *   user's side the code loses its card (code - code % 3), so the foul and its free kick / injury stay.
+ *   Side → team as func_002CDA60: core table 3 = u32 [seq+8] + 0xC, X = u32 [[core3 + 0x10] + 0x50] = team 0's side in
+ *   periods 0/2/4, the other side in 1/3/5. */
+void saka_no_cards_hook(uint32_t rec, uint32_t seq)
+{
+    static long plays, fouls;
+    if (!rec || !seq) return;
+    plays++;
+    const uint32_t ev = rec + 0x28u;
+    const int32_t type = (int32_t)ld_be32(ev);
+    if (type < 9 || type > 11) return;
+    const int32_t code = (int32_t)ld_be32(ev + 0x38u);
+    if (++fouls <= 64 && (code <= 0 || code % 3 == 0))
+        fprintf(stderr, "[nocards] foul type %d code %d (no card) side %d (plays %ld, fouls %ld)\n", type, code,
+                (int32_t)ld_be32(ev + 0x30u), plays, fouls);
+    if (code <= 0 || code > 11 || code % 3 == 0) return;
+    const int32_t side = (int32_t)ld_be32(ev + 0x30u), period = (int32_t)ld_be32(ev + 4u);
+    const uint32_t db = ld_be32(seq + 8u);
+    const uint32_t core3 = db ? ld_be32(db + 0xCu) : 0;
+    const uint32_t sides = core3 ? ld_be32(core3 + 0x10u) : 0;
+    if (!sides || (side != 0 && side != 1) || period < 0 || period > 5) return;
+    const uint32_t x = ld_be32(sides + 0x50u);
+    const uint32_t side0 = (period & 1) ? (uint32_t)(x == 0) : x;
+    const uint32_t team = (uint32_t)side == side0 ? 0u : 1u;
+    const int mine = match_team_is_user(team);
+    fprintf(stderr, "[nocards] foul type %d code %d (%s) side %d period %d -> team %u%s%s\n", type, code,
+            code % 3 == 1 ? "yellow" : "red", side, period, team, mine ? " (ours)" : "",
+            mine && s_cheat_switch[20] ? ": card removed" : "");
+    if (!s_cheat_switch[20] || !mine) return;
+    st_be32(ev + 0x38u, (uint32_t)(code - code % 3));
+    s_cheat_hook_calls[20]++;
+}
 
 /* 4 HIZO TRAINING SUCCESS (the port's own): func_00567A2C (new trait) and func_00567B74 (new skill) roll
  *   rand(0,99) against the cumulative chances of the training's three outcomes; a roll above them all gives nothing
@@ -1390,23 +1878,278 @@ void saka_foreign_hook(ppu_context* ctx)
  *   capacity (the facilities' sizes, master table 0x2B +0xA, against the clubhouse level's capacity: the "cost"),
  *   2 not enough money, 3 clubhouse level too low, 4/5 can. Hook at its return: 1 and 3 become 4.
  * 6 FACILITY 1 WEEK (the port's own): func_0054220C stores the build time (master +9, x2 weeks) at slot +2. Hook
- *   after the store: 1 week. */
+ *   after the store: 1 week. The stadium's func_00542100 does the same (slot in r27 too; 2026-11-09). */
+/* 9 INTERVIEW (면담 무제한, 2026-11-09, owner: "면담도 무제한이 아니었어"): interviews are limited per month (1 + GM
+ *   skills 0x73/0x74). func_00590B58(mask) tests the month's flags u32 0x00EECE24 (bits 1/0x20/0x40/0x80 = interviews,
+ *   set by func_003F9DF0 when a player is chosen, cleared monthly by func_0058B004); the schedule asks it when it opens
+ *   (func_003F6338) and on a choice (func_003F73AC). The cheat's data code clears the bits ten times a second; this hook
+ *   makes the test itself read them as clear, so nothing depends on that timing. r4 = the flags just loaded. */
+void saka_interview_hook(ppu_context* ctx)
+{
+    if (s_cheat_switch[9]) { ctx->gpr[4] &= ~0xE1ull; s_cheat_hook_calls[9]++; }
+}
+
+/* Training (2026-11-09, owner: "비장의 아이 훈련도 아무에게나 걸어놓고 ... 내가 원할때 까지 슬롯에 고정", "특별훈련
+ * 비장의아이훈련의 효과에 대한 배수설정", "일반적인 훈련의 배수효과"; REA Ghidra, re/decomp_all.c):
+ * - Slots: special training (SP) 3 x 0xC at 0x00EE83A8 (+0 player ID, +4 course, +8 u8 weeks left); 秘蔵っ子 3 x 0x20
+ *   at 0x00EE83CC (+0 ID, +4 kind 1 能力覚醒 / 0 個性強化, +8 course, +0xC u8 weeks left). The weekly update
+ *   func_005177A0 counts the weeks down; an SP slot gives experience every week and ends in func_00515B80; a 秘蔵っ子
+ *   slot gives its effect only when it ends, then is cleared (func_0050CD18 counts the finished plans).
+ * - Choosing: no age limit; only a badly injured player (+0x100 == 2) or one abroad (+0xE8 & 0x20000) is left out
+ *   (func_0006D858). The courses grey out when func_005122DC says the player does not meet them (play style +0x28,
+ *   skill type/level +0x2C/+0x30, trait +0x34, awakening level +0x38 of the course record).
+ * 10 COURSE ANY: func_005122DC returns 1 (met); a 能力覚醒 course also needs the awakening-ready bit (+0xE8 0x100000)
+ *    when it ends, read as set.
+ * 11 SLOT KEEP: func_005177A0 is snapshotted before its slot passes; when a plan ends and the game clears its slot,
+ *    the slot is put back with the course's full time (SP: master u8 0x00E18A3C + course x 0x18 + 0x14, x2 weeks;
+ *    能力覚醒 0x00E154A8 + course x 0x3C + 4, 個性強化 0x00E17238 + course x 0x3C + 4, & 0x7F, x2). A plan the user
+ *    takes off in the menu, or one an injury clears (func_00514FB0), is not put back. With "1턴 완료" the effect comes
+ *    every week. The slots stay 3: the save has room for 3 of each, nothing more.
+ * 12 TRAINING x: normal training's experience (func_00515548, before func_00577318: r5 and r20, the week's total).
+ * 13 SPECIAL x: SP weekly experience (r5, r24), 個性強化 end experience (r5), 能力覚醒 limit rise (func_00512910 r6;
+ *    the game caps limits at 100), SP end awakening points (r4).
+ * 14 AWAKENING x: every awakening-point gain of a player of the user's club (func_00568B08 entry, r3 player, r4). */
+static uint8_t s_keep_sp[3][0xC], s_keep_hizo[3][0x20];
+static int s_keep_valid;
+
+static uint32_t cheat_multiplier(int sw)
+{
+    const uint32_t m = s_cheat_switch_value[sw];
+    return m < 1 ? 1 : m > 100 ? 100 : m;
+}
+static uint64_t cheat_scaled(uint64_t reg, int sw, int32_t cap)
+{
+    const int32_t v = (int32_t)reg;
+    if (v <= 0) return reg;
+    const int64_t m = (int64_t)v * cheat_multiplier(sw);
+    return (uint64_t)(int64_t)(int32_t)(m > cap ? cap : m);
+}
+/* The record (the club's 23 or the youth team's 15) that addr points into, 0 for any other address. */
+static uint32_t cheat_record_of(uint32_t addr)
+{
+    if (addr >= CHEAT_ROSTER && addr < CHEAT_ROSTER + 23u * CHEAT_RECORD)
+        return CHEAT_ROSTER + (addr - CHEAT_ROSTER) / CHEAT_RECORD * CHEAT_RECORD;
+    if (addr >= 0x00EE86E0u && addr < 0x00EE86E0u + 15u * CHEAT_RECORD)
+        return 0x00EE86E0u + (addr - 0x00EE86E0u) / CHEAT_RECORD * CHEAT_RECORD;
+    return 0;
+}
+/* The multiplier for the player of the record addr points into, kind k (0 training, 1 special, 2 awakening): his own
+ * (players.txt x<k>), else the switch's while it is on, else 1 (nothing). */
+static uint32_t cheat_mult_for(uint32_t addr, int k, int sw)
+{
+    const uint32_t rec = cheat_record_of(addr);
+    if (rec) {
+        const uint32_t id = ld_be32(rec);
+        const int c = s_pmult_cur, n = s_pmult_n[c];
+        for (int j = 0; j < n; j++)
+            if (s_pmult[c][j].id == id && s_pmult[c][j].m[k]) { s_cheat_hook_calls[31]++; return s_pmult[c][j].m[k]; }
+    }
+    return s_cheat_switch[sw] ? cheat_multiplier(sw) : 1;
+}
+static uint64_t cheat_scale_by(uint64_t reg, uint32_t m, int32_t cap)
+{
+    const int32_t v = (int32_t)reg;
+    if (v <= 0 || m <= 1) return reg;
+    const int64_t r = (int64_t)v * m;
+    return (uint64_t)(int64_t)(int32_t)(r > cap ? cap : r);
+}
+void saka_course_cond_hook(ppu_context* ctx)   /* func_005122DC's return: r3 = 1 when the player meets the course */
+{
+    if (s_cheat_switch[10]) { ctx->gpr[3] = 1; s_cheat_hook_calls[10]++; }
+}
+void saka_awaken_ready_hook(ppu_context* ctx)   /* func_005177A0, a 能力覚醒 plan ends: r3 = the player's +0xE8 */
+{
+    if (s_cheat_switch[10]) { ctx->gpr[3] |= 0x100000ull; s_cheat_hook_calls[10]++; }
+}
+void saka_train_snapshot_hook(ppu_context* ctx)   /* func_005177A0 before its SP and 秘蔵っ子 passes */
+{
+    (void)ctx;
+    s_keep_valid = s_cheat_switch[11];
+    if (!s_keep_valid) return;
+    memcpy(s_keep_sp, vm_base + 0x00EE83A8u, sizeof s_keep_sp);
+    memcpy(s_keep_hizo, vm_base + 0x00EE83CCu, sizeof s_keep_hizo);
+}
+void saka_train_sp_keep_hook(ppu_context* ctx)   /* after func_00515B80 ended an SP plan: r29 = its slot, r30 = index */
+{
+    const uint32_t slot = (uint32_t)ctx->gpr[29], i = (uint32_t)ctx->gpr[30];
+    if (!s_cheat_switch[11] || !s_keep_valid || i >= 3 || slot != 0x00EE83A8u + 0xCu * i) return;
+    const uint8_t* s = s_keep_sp[i];
+    const uint32_t id = (uint32_t)s[0] << 24 | (uint32_t)s[1] << 16 | (uint32_t)s[2] << 8 | s[3];
+    const uint32_t course = (uint32_t)s[4] << 24 | (uint32_t)s[5] << 16 | (uint32_t)s[6] << 8 | s[7];
+    if (!id || ld_be32(slot) != 0 || course >= 0x100u) return;   /* nothing kept, or the slot is in use again */
+    memcpy(vm_base + slot, s, 0xC);
+    const uint32_t weeks = vm_base[0x00E18A3Cu + course * 0x18u + 0x14u] * 2u;
+    vm_base[slot + 8] = (uint8_t)(weeks ? (weeks > 255 ? 255 : weeks) : 1);
+    s_cheat_hook_calls[11]++;
+}
+static void hizo_keep(ppu_context* ctx, uint32_t table)   /* after func_0050CD18: r30 = the 秘蔵っ子 slot, r31 = index */
+{
+    const uint32_t slot = (uint32_t)ctx->gpr[30], i = (uint32_t)ctx->gpr[31];
+    if (!s_cheat_switch[11] || !s_keep_valid || i >= 3 || slot != 0x00EE83CCu + 0x20u * i) return;
+    const uint8_t* s = s_keep_hizo[i];
+    const uint32_t id = (uint32_t)s[0] << 24 | (uint32_t)s[1] << 16 | (uint32_t)s[2] << 8 | s[3];
+    const uint32_t course = (uint32_t)s[8] << 24 | (uint32_t)s[9] << 16 | (uint32_t)s[10] << 8 | s[11];
+    if (!id || ld_be32(slot) != 0 || course >= 0x100u) return;
+    memcpy(vm_base + slot, s, 0x20);
+    const uint32_t weeks = (vm_base[table + course * 0x3Cu + 4u] & 0x7Fu) * 2u;
+    vm_base[slot + 0xC] = (uint8_t)(weeks ? weeks : 1);
+    s_cheat_hook_calls[11]++;
+}
+void saka_train_awaken_keep_hook(ppu_context* ctx) { hizo_keep(ctx, 0x00E154A8u); }
+void saka_train_personal_keep_hook(ppu_context* ctx) { hizo_keep(ctx, 0x00E17238u); }
+/* Switches 12-14 and the per-player multipliers (cheat_mult_for): the player is the record in r3 (r4 for the limit
+ * rise, the record + the ability). */
+void saka_train_mult_hook(ppu_context* ctx)   /* normal training, before func_00577318: r3 = record, r5 = r20 = experience */
+{
+    const uint32_t m = cheat_mult_for((uint32_t)ctx->gpr[3], 0, 12);
+    if (m <= 1) return;
+    ctx->gpr[5] = cheat_scale_by(ctx->gpr[5], m, 0xFFFF);
+    ctx->gpr[20] = ctx->gpr[5];
+    s_cheat_hook_calls[12]++;
+}
+void saka_sp_week_mult_hook(ppu_context* ctx)   /* SP weekly, before func_00577318: r3 = record, r5 = r24 = experience */
+{
+    const uint32_t m = cheat_mult_for((uint32_t)ctx->gpr[3], 1, 13);
+    if (m <= 1) return;
+    ctx->gpr[5] = cheat_scale_by(ctx->gpr[5], m, 0xFFFF);
+    ctx->gpr[24] = ctx->gpr[5];
+    s_cheat_hook_calls[13]++;
+}
+void saka_personal_mult_hook(ppu_context* ctx)   /* 個性強化 end, before func_00577318: r3 = record, r5 = experience */
+{
+    const uint32_t m = cheat_mult_for((uint32_t)ctx->gpr[3], 1, 13);
+    if (m <= 1) return;
+    ctx->gpr[5] = cheat_scale_by(ctx->gpr[5], m, 0xFFFF);
+    s_cheat_hook_calls[13]++;
+}
+void saka_awaken_limit_mult_hook(ppu_context* ctx)   /* 能力覚醒 limit rise (func_00512910): r4 = record + ability, r6 = the rise */
+{
+    const uint32_t m = cheat_mult_for((uint32_t)ctx->gpr[4], 1, 13);
+    if (m <= 1) return;
+    ctx->gpr[6] = cheat_scale_by(ctx->gpr[6], m, 100);
+    s_cheat_hook_calls[13]++;
+}
+/* SP end: func_00568B08 (every awakening-point gain, switch 14's hook) is called right after with the same record. The
+ * points get the larger of the two multipliers here, and that call does not multiply them again (no x special x
+ * awakening). */
+static volatile uint32_t s_awake_done_rec;
+void saka_sp_awake_mult_hook(ppu_context* ctx)   /* SP end, before func_00568B08: r3 = record, r4 = awakening points */
+{
+    const uint32_t rec = (uint32_t)ctx->gpr[3];
+    const uint32_t ms = cheat_mult_for(rec, 1, 13), ma = cheat_mult_for(rec, 2, 14), m = ms > ma ? ms : ma;
+    s_awake_done_rec = rec;
+    if (m <= 1) return;
+    ctx->gpr[4] = cheat_scale_by(ctx->gpr[4], m, 0xFFFF);
+    s_cheat_hook_calls[ms >= ma ? 13 : 14]++;
+}
+void saka_awake_mult_hook(ppu_context* ctx)   /* func_00568B08 entry: r3 = player record, r4 = points */
+{
+    const uint32_t rec = (uint32_t)ctx->gpr[3];
+    if (s_awake_done_rec) {
+        const int sp_end = s_awake_done_rec == rec;
+        s_awake_done_rec = 0;
+        if (sp_end) return;
+    }
+    /* the user's club, or its youth team (15 records of the same layout at 0x00EE86E0; owner, 2026-11-09) */
+    if (!cheat_record_of(rec)) return;
+    const uint32_t m = cheat_mult_for(rec, 2, 14);
+    if (m <= 1) return;
+    ctx->gpr[4] = cheat_scale_by(ctx->gpr[4], m, 0xFFFF);
+    s_cheat_hook_calls[14]++;
+}
+
+/* 15 NEGOTIATION (2026-11-09, owner: "협상도 100%가 통하지 않네"): every negotiation runs in the EV_TRANSFER scene
+ *   (FUN_00347610); func_0053115C(gauge, attempts) decides it: 2 = signs (offer % + bonus >= 100), 1 = one more
+ *   chance, 0 = refused (and the club's affinity drops). Hook at its return: 2. The club's transfer-fee talks use the
+ *   same gauge, so they are accepted too; the player signs for the salary on offer.
+ * 16 FULL HOUSE (owner: "구장 관중치트도 필요해"): func_0053D7A8 computes a match's attendance (seats = stadium master
+ *   0x43 +0x11 x 1000); after it asks the game's own full-house flag (func_004D1190(0xF)), r3 = 1 takes that branch:
+ *   attendance = seats, unsold = 0 (it goes to 0x00F99260 for the match, and into the gate income). */
+void saka_negotiate_hook(ppu_context* ctx)
+{
+    if (s_cheat_switch[15]) { ctx->gpr[3] = 2; s_cheat_hook_calls[15]++; }
+}
+/* Only the user's own matches (2026-11-09, owner: "자동으로 팀감지하는 기능은 모든 치트에게서 넣어야"): func_005763B0
+ * asks for the user's match into 0x00F99254 (attendance at +0xC); the other clubs' simulated matches (func_00496998)
+ * into a stack buffer, and they were made full too. r16 = func_0053D7A8's first argument, kept from its entry. */
+void saka_full_house_hook(ppu_context* ctx)
+{
+    if (s_cheat_switch[16] && (uint32_t)ctx->gpr[16] == 0x00F99254u) { ctx->gpr[3] = 1; s_cheat_hook_calls[16]++; }
+}
+void saka_money_hook(ppu_context* ctx)   /* after the store of func_0053F3A0 / func_0053F434 / func_00544558 */
+{
+    (void)ctx;
+    if (s_money_lock) st_be32(CHEAT_MONEY, s_money_value);
+}
 void saka_hizo_roll_hook(ppu_context* ctx)
 {
     if (s_cheat_switch[4]) { ctx->gpr[3] = 1; s_cheat_hook_calls[4]++; }
 }
+/* 2026-11-09 (owner: the clubhouse went to SPACE 48/20 and its list broke; "구장시설은 아예 제한이 풀리지도 않았어";
+ *   "모든 설치가능한 시설은 0스페이스로"): 1 (over capacity) is no longer turned into 4, because building past the
+ *   capacity left the menus inconsistent. The cheat's own data codes set every facility's size to 0 instead (master
+ *   table 0x2B clubhouse, 41 x 0x14 at 0x00E25B2C, +0xA; table 0x2A stadium, 50 x 0x10 at 0x00E25E68, +0xA; static
+ *   data in the EBOOT), so the used space (func_005402C4 / func_00540238, summing the sizes of the 27 built slots)
+ *   stays 0 and 1 cannot happen. The same hook now also sits at the stadium's check func_0054F130 (same codes: 0
+ *   built, 1 capacity, 2 money, 3 stadium type, 4/5 can). */
 void saka_facility_check_hook(ppu_context* ctx)
 {
     if (!s_cheat_switch[5]) return;
-    const int32_t r = (int32_t)ctx->gpr[3];
-    if (r == 1 || r == 3) { ctx->gpr[3] = 4; s_cheat_hook_calls[5]++; }
+    if ((int32_t)ctx->gpr[3] == 3) { ctx->gpr[3] = 4; s_cheat_hook_calls[5]++; }
 }
-/* 7 EDIT 99 (Vita "EDIT 99", a heap byte there): the edit-player menu object (heap) keeps its points at +0x8A8;
- *   func_003CB8E8 starts them at 50 (0x32) and func_003CAD38 adds the slot bonus (+0x8AC) and caps the sum at 99,
- *   the game's own maximum. Hook after the 50 is stored: 99. */
-void saka_edit_points_hook(ppu_context* ctx)
+/* 7 EDIT 99 (Vita "EDIT 99", a heap byte there, so VitaCheat kept it at 99): the edit-player menu object (heap)
+ *   keeps its points at +0x8A8; func_003CB8E8 starts them at 50 (0x32) and func_003CAD38 adds the slot bonus
+ *   (+0x8AC) and caps the sum at 99, the game's own maximum. The value is the switch's (0-99; 99 in the list).
+ *   2026-11-09 (owner: the points fell to 9 after spending, "고정이 되게 해줘"): func_003CC0D4, the menu's update,
+ *   spends them: an item level (+0x8B0[i], 0-3) costs 10 and an ability point 1, going back refunds them, and
+ *   cancelling an ability edit restores +0x90C. 고정: each of those writes is followed by the value again
+ *   (saka_edit_points_lock_hook; _merge_hook after the slot bonus), and the update's entry puts it back if anything
+ *   else changed it. 고정 off: the value goes in when a new player starts, and once when the cheat is turned on, the
+ *   value changes or 갱신 is pressed, also in the middle of an edit (the entry hook; the update then redraws the
+ *   points tag as func_003CB89C does). */
+static volatile uint32_t s_edit_obj;   /* the menu whose points func_003CB8E8 started (its points tag exists) */
+static long s_edit_gen_done = -1;      /* the switch generation put into it last */
+
+static uint32_t edit_points_value(void)
 {
-    if (s_cheat_switch[7]) { st_be32((uint32_t)ctx->gpr[29] + 0x8A8u, 99); s_cheat_hook_calls[7]++; }
+    const uint32_t v = s_cheat_switch_value[7];
+    return v > 99 ? 99 : v;
+}
+void saka_edit_points_hook(ppu_context* ctx)   /* func_003CB8E8 after the start value is stored; r29 = the menu */
+{
+    s_edit_obj = (uint32_t)ctx->gpr[29];
+    if (!s_cheat_switch[7]) return;
+    st_be32(s_edit_obj + 0x8A8u, edit_points_value());
+    s_edit_gen_done = s_cheat_switch_gen[7];
+    s_cheat_hook_calls[7]++;
+}
+void saka_edit_points_lock_hook(ppu_context* ctx)   /* after func_003CC0D4 changes the points; r30 = the menu */
+{
+    if (!s_cheat_switch[7] || !s_cheat_switch_lock[7]) return;
+    st_be32((uint32_t)ctx->gpr[30] + 0x8A8u, edit_points_value());
+    s_cheat_hook_calls[7]++;
+}
+void saka_edit_points_merge_hook(ppu_context* ctx)   /* func_003CAD38 after the slot bonus; r30 = the menu, r29 = the points shown next */
+{
+    if (!s_cheat_switch[7] || !s_cheat_switch_lock[7]) return;
+    const uint32_t v = edit_points_value();
+    st_be32((uint32_t)ctx->gpr[30] + 0x8A8u, v);
+    ctx->gpr[29] = v;
+    s_cheat_hook_calls[7]++;
+}
+int saka_edit_points_frame(ppu_context* ctx)   /* func_003CC0D4's entry; r3 = the menu. 1: the caller redraws the points */
+{
+    const uint32_t obj = (uint32_t)ctx->gpr[3];
+    if (!s_cheat_switch[7] || obj != s_edit_obj) return 0;
+    const long gen = s_cheat_switch_gen[7];
+    const uint32_t v = edit_points_value();
+    const uint32_t cur = ld_be32(obj + 0x8A8u);
+    if (gen == s_edit_gen_done && (!s_cheat_switch_lock[7] || cur == v)) return 0;
+    s_edit_gen_done = gen;
+    if (cur == v) return 0;
+    st_be32(obj + 0x8A8u, v);
+    s_cheat_hook_calls[7]++;
+    return 1;
 }
 void saka_facility_build_hook(ppu_context* ctx)
 {

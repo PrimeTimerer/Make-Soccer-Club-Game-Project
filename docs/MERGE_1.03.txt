@@ -1,0 +1,19 @@
+Saka Tsuku (BLJM61064) disc 1.00 + update 1.03 merge
+disc   : C:\Users\freeh\Desktop\Fight Emulations\Saka Tsuku - Pro Soccer Club o Tsukurou (Japan)\Saka Tsuku Ps3\PS3_GAME
+update : C:\Users\freeh\Desktop\Fight Emulations\Saka Tsuku - Pro Soccer Club o Tsukurou (Japan)\PC PORT\pkg_1.03\BLJM61064
+merged : C:\Users\freeh\Desktop\Fight Emulations\Saka Tsuku - Pro Soccer Club o Tsukurou (Japan)\PC PORT\merged_1.03\PS3_GAME
+overlaid:
+  USRDIR/EBOOT.BIN                             <- update USRDIR/EBOOT.BIN
+  ICON0.PNG                                    <- update ICON0.PNG
+  USRDIR/patch/dlc/3d/dlc.par                  <- update USRDIR/patch/dlc/3d/dlc.par
+  USRDIR/patch/dlc/png/png_uniform_dlc.par     <- update USRDIR/patch/dlc/png/png_uniform_dlc.par
+  USRDIR/data/3d/dlc/dlc.par                   <- update USRDIR/patch/dlc/3d/dlc.par
+  USRDIR/data/png/png_uniform_dlc.par          <- update USRDIR/patch/dlc/png/png_uniform_dlc.par
+  PARAM.SFO                                    disc SFO kept, APP_VER 01.00 -> 01.03 (only change)
+verify : 643 disc files identical size, 5 overlaid files hash-checked, extra files = ['USRDIR/patch/dlc/3d/dlc.par', 'USRDIR/patch/dlc/png/png_uniform_dlc.par']
+note   : update archives under patch/dlc are full supersets of the disc data/ archives (no entry removed),
+         so they are placed at both paths. In a port VFS map /dev_bdvd/PS3_GAME and
+         /dev_hdd0/game/BLJM61064 to this folder. Update PARAM.SFO (CATEGORY=GD) kept only in the update dir.
+UPDATE 2026-11-06: RPCS3 log shows install data is written to /dev_hdd0/game/BLJM61064, so the port must map that path to a separate writable folder (seeded from pkg_1.03\BLJM61064), not to this merged folder. See PORT_1.03_RUNTIME.md.
+UPDATE 2026-11-06 (2): an 11-min RPCS3 1.03 run opened the DLC archives only from /dev_hdd0/game/BLJM61064/USRDIR/patch/dlc (disc data/ DLC archives: 0 opens). For the 1.03 runtime use the ORIGINAL disc for /dev_bdvd plus a writable copy of pkg_1.03\BLJM61064; this merged copy is not needed. See PORT_1.03_RUNTIME.md.
+UPDATE 2026-11-06 (3): merged_1.03 was moved to the Recycle Bin (owner approved). The 1.03 port input is runtime_1.03.

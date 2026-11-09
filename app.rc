@@ -1,0 +1,3 @@
+// The port's icon (2026-11-09, owner: "실행파일의 아이콘도 좀 만들어주라"): a pitch tile with a football, 16-256 px.
+// The launcher uses the same file (tools/launcher/icon.ico). Drawn by a System.Drawing script (NOTES.md).
+1 ICON "app.ico"

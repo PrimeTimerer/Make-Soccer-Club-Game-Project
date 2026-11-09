@@ -479,10 +479,12 @@ SAKA_TRACE_FN(libsre, 3000A750, "cellSpursSendWorkloadSignal", 500)
  * 0 = before the notice screen, 1 = notice/logos showing (fast), 2 = title
  * reached (never again). The frame clock reads it. */
 static volatile LONG s_boot_ff = 0;
+extern "C" void saka_cheats_title(void);   /* saka_hooks.c: per-save cheat settings (the title shows) */
 static void saka_on_file_open(const char* p)
 {
     if (s_boot_ff == 0 && strstr(p, "sb/attention.par")) InterlockedExchange(&s_boot_ff, 1);
     else if (s_boot_ff != 2 && strstr(p, "sb2/bg_top_menu.par")) InterlockedExchange(&s_boot_ff, 2);
+    if (strstr(p, "sb2/bg_top_menu.par") || strstr(p, "sb/top_menu.par")) saka_cheats_title();
 }
 
 /* SAKA_DECODE_TRACE=1: the async file thread's decode tasks (sl_decoder):

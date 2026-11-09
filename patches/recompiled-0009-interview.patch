@@ -1,0 +1,16 @@
+diff --git a/recompiled/ppu_recomp_028.cpp b/recompiled/ppu_recomp_028.cpp
+--- a/recompiled/ppu_recomp_028.cpp
++++ b/recompiled/ppu_recomp_028.cpp
+@@ -77252,10 +77252,12 @@ void func_00590B44(ppu_context* ctx) {
+         return;
+ }
+ 
++extern "C" void saka_interview_hook(ppu_context* ctx);   /* saka_hooks.c: cheat 면담 무제한 (switch 9) */
+ void func_00590B58(ppu_context* ctx) {
+     PPU_MM_SNAP
+         ctx->gpr[4] = (int64_t)(int32_t)((uint32_t)0xEF << 16);
+         ctx->gpr[4] = vm_read32(ctx->gpr[4] + -0x31DC);
++        saka_interview_hook(ctx);   /* the month's interview bits read as clear */
+         ctx->gpr[3] = ctx->gpr[4] & ctx->gpr[3];
+         ctx->gpr[3] = (uint32_t)ctx->gpr[3] ? __builtin_clz((uint32_t)ctx->gpr[3]) : 32;
+         ctx->gpr[3] = ppc_rlw64(ctx->gpr[3], 27, 31, 31, 0, 0);

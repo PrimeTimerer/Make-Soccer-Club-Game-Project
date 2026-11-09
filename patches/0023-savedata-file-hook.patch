@@ -1,0 +1,23 @@
+diff --git a/libs/system/cellSaveData.c b/libs/system/cellSaveData.c
+--- a/libs/system/cellSaveData.c
++++ b/libs/system/cellSaveData.c
+@@ -847,6 +847,10 @@ static void read_param_sfo(const char* save_path, CellSaveDataSystemFileParam* p
+ static volatile int s_savedata_busy;
+ int ps3_savedata_busy(void) { return __atomic_load_n(&s_savedata_busy, __ATOMIC_ACQUIRE); }
+ 
++/* A game port's view of the save files (e.g. per-save settings): called after each file operation of a save
++ * directory with the directory, the file name, the operation (CELL_SAVEDATA_FILEOP_*) and its result. */
++void (*g_savedata_file_hook)(const char* dir, const char* file, unsigned op, int result) = NULL;
++
+ static s32 savedata_execute_run(const char* dirName, int is_save,
+                                 CellSaveDataSetBuf* setBuf,
+                                 CellSaveDataStatCallback funcStat,
+@@ -985,6 +989,8 @@ static s32 savedata_execute_run(const char* dirName, int is_save,
+                    fileSet.fileOperation, fileSet.fileType,
+                    fileSet.fileName ? fileSet.fileName : "", fileSet.fileOffset,
+                    fileSet.fileSize, fileSet.fileBufSize, exc);
++            if (g_savedata_file_hook)
++                g_savedata_file_hook(dirName, fileSet.fileName ? fileSet.fileName : "", fileSet.fileOperation, exc);
+             if (exc < 0) { free(fileList); return exc; }
+             exc_size = (u32)exc;
+         }
