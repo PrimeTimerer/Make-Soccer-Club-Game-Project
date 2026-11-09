@@ -1333,3 +1333,26 @@ Owner: "선수나 감독 스카우트 목록을 검색할때 영어로도 검색
     - 5 of the name-inferred entries are now confirmed by the site.
   - Total: 643 players. 638 have a source and 5 are still inferred (Gerd Muller, the Laudrups, the de Boers).
   - Backups: logs/legends.txt.pre_1110 (before 7450) and logs/legends.txt.pre_1110b (before the second pass).
+
+## F2 menu: free layout and visible results (2026-11-10)
+Owner: "이 F2 내부 인터페이스가 자유롭게 안팎으로 조정가능해야해. 제대로 적용이 안되거나 하는걸 보지를 못해." In the owner's screenshots the window could not move or resize (its size and place were set every frame). Fixed widths cut off the roster names, and the skill row (5 x 250 px boxes + 70 px levels, about 1600 px) ran past the pane, so skills 3-5 could not be seen.
+- **Window:** the old size in the middle at first. After that it can be moved by its title bar and resized by its edges.
+  - 기본 크기 and 화면 가득 sit at the right end of the speed line.
+  - A window left outside the screen comes back on screen.
+- **Panes:** the 선수 roster and the 목록 slots widen by dragging their right border (ImGuiChildFlags_ResizeX).
+  - Every pane scrolls sideways when its rows are wider.
+  - The original skill and the five skills wrap to the pane's width, and so do the row buttons.
+  - Widths follow the font: `Px(px)` = px x font size / 19.
+- **Zoom:** 글자 -/+ or Ctrl+wheel, 60-200 % (style.FontScaleMain).
+- **Saved:** `cheats\overlay.ini` (ImGui's ini) keeps the place, size, pane widths and zoom. The zoom is in its own `[SakaOverlay][Main]` section. The file is git-ignored and not in the release zip.
+- **Results:** the 3 s toast at the screen's bottom became a status line inside the window. The last result stays (warnings in orange), and hovering it shows the last 12.
+- **Is it in the game:** each edited row compares the game's value with the edit after 적용.
+  - Green "게임에 들어감" shows for 5 s.
+  - Red "안 들어감: 게임 값 N" shows when a 고정 edit has not held for 1.5 s, or a one-time edit is not in the game 3 s after 적용. The status line also gets one orange warning.
+  - A minute later, a one-time edit the game has changed since is noted in grey.
+  - The play style block names the first differing boxes (e.g. "1번 칸 스킬3 게임 0 / 넣은 값 5").
+  - Multipliers are used at training time, so they are not checked.
+- **Test aid:** `SAKA_OVERLAY_OPEN_ALL=1` opens the play style editor.
+- **Seen:** bench at the office, L3+R3, shot at 1280x720 (logs\f2layout.png). The roster has a sideways scrollbar, all 5 skills show two to a line, and the status line is at the bottom.
+  - Not checked live: dragging, zoom and the ini file. The ini is written within 5 s after a move, resize or zoom, and the bench changed none of them.
+- **Backup:** build-release\SakatsukuRecomp.prev_1309.exe and logs\saka_overlay.cpp.pre_layout.

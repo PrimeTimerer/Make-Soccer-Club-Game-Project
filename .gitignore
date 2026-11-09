@@ -40,3 +40,5 @@ tools/ps3/
 *.bat
 # Per-save cheat settings (made by the launcher and the game)
 cheats/saves/
+# F2 menu layout and zoom (made by the game)
+cheats/overlay.ini

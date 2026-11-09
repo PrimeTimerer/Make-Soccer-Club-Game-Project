@@ -19,11 +19,14 @@
 #include <d3d12.h>
 
 #include "imgui.h"
+#include "imgui_internal.h"   // AddSettingsHandler: the menu zoom is saved with the layout
 #include "backends/imgui_impl_dx12.h"
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
+#include <deque>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -529,10 +532,103 @@ void saveListEdits(const std::vector<ListEdit>& edits)
 // ---- the panels -------------------------------------------------------------------------------------------
 std::string g_toast;
 std::chrono::steady_clock::time_point g_toastAt;
-void toast(const std::string& s)
+int g_toastLevel = 0;   // 0 done, 1 warning (orange)
+std::deque<std::pair<std::chrono::steady_clock::time_point, std::string>> g_toastLog;   // the last ones (status line)
+void toast(const std::string& s, int level = 0)
 {
     g_toast = s;
+    g_toastLevel = level;
     g_toastAt = std::chrono::steady_clock::now();
+    g_toastLog.emplace_back(g_toastAt, s);
+    if (g_toastLog.size() > 12)
+        g_toastLog.pop_front();
+}
+
+// ---- a free layout (2026-11-10, owner: "이 F2 내부 인터페이스가 자유롭게 안팎으로 조정가능해야해. 제대로 적용이 안되거나
+// 하는걸 보지를 못해") ----
+// The window moves and resizes; the roster and the list slots widen by dragging their right border; panes scroll
+// sideways when narrower than their rows, and the skill boxes wrap; Ctrl+wheel or 글자 -/+ zooms. cheats\overlay.ini
+// keeps all of it. Sizes below are for the 19 px font of 1280x720 and follow the font (resolution and zoom).
+float g_uiScale = 1.0f;
+float g_footerH = 0.0f;   // the status line under the tabs
+bool g_resetRoster = false, g_resetSlots = false;
+inline float Px(float px) { return px * ImGui::GetFontSize() / 19.0f; }
+float btnW(const char* label) { return ImGui::CalcTextSize(label, nullptr, true).x + ImGui::GetStyle().FramePadding.x * 2.0f; }
+void zoomBy(float d)
+{
+    g_uiScale = std::max(0.6f, std::min(2.0f, std::round((g_uiScale + d) * 10.0f) / 10.0f));
+    if (ImGui::GetCurrentContext())
+        ImGui::MarkIniSettingsDirty();
+}
+// The right end of the shown part of the current window (screen x): rows wrap against it even while the pane can
+// scroll sideways (its work area is then as wide as its widest row).
+float visibleRight()
+{
+    const ImGuiStyle& st = ImGui::GetStyle();
+    return ImGui::GetWindowPos().x + ImGui::GetWindowWidth() - st.WindowPadding.x -
+           (ImGui::GetScrollMaxY() > 0.0f ? st.ScrollbarSize : 0.0f);
+}
+// SameLine() when an item this wide still fits on the line; otherwise it starts the next one.
+void fitSameLine(float width)
+{
+    if (ImGui::GetItemRectMax().x + ImGui::GetStyle().ItemSpacing.x + width <= visibleRight())
+        ImGui::SameLine();
+}
+// A grey note wrapped at the shown width.
+void note(const std::string& text)
+{
+    ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+    ImGui::PushTextWrapPos(std::max(ImGui::GetCursorPosX() + Px(200), visibleRight() - ImGui::GetWindowPos().x + ImGui::GetScrollX()));
+    ImGui::TextUnformatted(text.c_str());
+    ImGui::PopTextWrapPos();
+    ImGui::PopStyleColor();
+}
+// Whether an edit is in the game (2026-11-10): shortly after 적용 the row says so in green; red when a 고정 edit does
+// not hold for 1.5 s, or a once edit is not in the game 3 s after 적용 (the cheat thread reads players.txt again
+// within a second); a once edit the game has changed since is noted in grey a minute later.
+// applyCheck returns 0 nothing to show, 1 green, 2 red, 3 grey.
+std::map<std::string, std::chrono::steady_clock::time_point> g_appliedAt, g_differSince;
+std::set<std::string> g_warned;   // red rows already told in the status line
+void appliedNow(const std::string& key)
+{
+    g_appliedAt[key] = std::chrono::steady_clock::now();
+    g_differSince.erase(key);
+    g_warned.erase(key);
+}
+int applyCheck(const std::string& key, bool same, bool lock)
+{
+    using namespace std::chrono;
+    const auto now = steady_clock::now();
+    const auto ap = g_appliedAt.find(key);
+    const double sinceApply = ap == g_appliedAt.end() ? 1e9 : duration<double>(now - ap->second).count();
+    if (same) {
+        g_differSince.erase(key);
+        return sinceApply < 5.0 ? 1 : 0;
+    }
+    const double differ = duration<double>(now - g_differSince.emplace(key, now).first->second).count();
+    if (lock ? differ > 1.5 : sinceApply > 3.0 && sinceApply < 60.0 && differ > 2.5)
+        return 2;
+    return !lock && sinceApply >= 60.0 ? 3 : 0;
+}
+void applyStateText(int state, const std::string& red, const std::string& grey)
+{
+    if (state == 0)
+        return;
+    ImGui::SameLine();
+    if (state == 1)
+        ImGui::TextColored(ImVec4(0.45f, 0.9f, 0.45f, 1.0f), "게임에 들어감");
+    else if (state == 2)
+        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.35f, 1.0f), "%s", red.c_str());
+    else
+        ImGui::TextDisabled("%s", grey.c_str());
+}
+// A red row is told once in the status line too.
+void warnOnce(const std::string& key, int state, const std::string& text)
+{
+    if (state == 2 && g_warned.insert(key).second)
+        toast(text, 1);
+    else if (state != 2)
+        g_warned.erase(key);
 }
 
 char g_cheatFilter[128];
@@ -540,12 +636,12 @@ std::map<std::string, long long> g_inputs;   // value boxes: "cheat\tn" -> typed
 
 void cheatsPanel()
 {
-    ImGui::SetNextItemWidth(320);
+    ImGui::SetNextItemWidth(Px(320));
     ImGui::InputTextWithHint("##cheatfilter", "찾기 (이름·설명)", g_cheatFilter, sizeof g_cheatFilter);
     ImGui::SameLine();
     ImGui::TextDisabled("켜면 1초 안에 적용. 고정 = 1초에 10번 다시 씀, 끄면 켤 때 한 번만.");
     ImGui::Separator();
-    ImGui::BeginChild("cheats");
+    ImGui::BeginChild("cheats", ImVec2(0, -g_footerH), 0, ImGuiWindowFlags_HorizontalScrollbar);
     std::string shown;
     const std::string filter = g_cheatFilter;
     for (Cheat& c : g_files.cheats) {
@@ -615,7 +711,7 @@ void cheatsPanel()
             if (v.kind == "staff" || v.kind == "scout") {
                 loadTexts();
                 const Names& names = v.kind == "staff" ? g_text.staff : g_text.scouts;
-                ImGui::SetNextItemWidth(320);
+                ImGui::SetNextItemWidth(Px(320));
                 if (ImGui::BeginCombo(v.label.c_str(), (std::to_string(typed) + "  " + nameOf(names, (int)typed)).c_str())) {
                     for (const auto& kv : names)
                         if (kv.first >= v.min && kv.first <= v.max)
@@ -625,7 +721,7 @@ void cheatsPanel()
                 }
             } else {
                 int value32 = (int)std::min<long long>(std::max<long long>(typed, INT32_MIN), INT32_MAX);
-                ImGui::SetNextItemWidth(200);
+                ImGui::SetNextItemWidth(Px(200));
                 if (ImGui::InputInt(v.label.c_str(), &value32, 1, 100))
                     typed = value32;
             }
@@ -679,7 +775,12 @@ void playersPanel()
     const uint32_t youth = 0x00EE86E0u;
     auto slotRec = [&](int s) { return s < 23 ? roster + record * (uint32_t)s : youth + record * (uint32_t)(s - 23); };
     const bool haveYouth = committed(youth, 15 * record);
-    ImGui::BeginChild("roster", ImVec2(330, 0), ImGuiChildFlags_Borders);
+    if (g_resetRoster) {   // 기본 크기: the first width again
+        g_resetRoster = false;
+        ImGui::SetNextWindowSize(ImVec2(Px(330), 0.0f), ImGuiCond_Always);
+    }
+    ImGui::BeginChild("roster", ImVec2(Px(330), -g_footerH), ImGuiChildFlags_Borders | ImGuiChildFlags_ResizeX,
+                      ImGuiWindowFlags_HorizontalScrollbar);
     // Positions (+0x204 u32, 2026-11-09, owner: "몇명인지 어떤 포지션들로 몇명있는지도 표시"): the names of the
     // position aptitudes (pledit_ability_name 19-29), grouped GK / DF / MF / FW.
     static const char* const kPos[11] = {"GK", "LSB", "RSB", "CB", "DM", "LSM", "RSM", "OM", "LWG", "RWG", "FW"};
@@ -702,11 +803,8 @@ void playersPanel()
         for (int p = 0; p < 11; p++)
             if (each[p])
                 detail += std::string(detail.empty() ? "" : " · ") + kPos[p] + " " + std::to_string(each[p]);
-        if (!detail.empty()) {   // wrapped: the list is narrow
-            ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
-            ImGui::TextWrapped("%s", detail.c_str());
-            ImGui::PopStyleColor();
-        }
+        if (!detail.empty())   // wrapped: the list is narrow
+            note(detail);
     };
     // 새로고침 (2026-11-09, owner: "이 구단 선수 목록도 리프레시가 되어야해"): the list reads the game every frame;
     // this also makes every value box and the play style boxes start again from the game's values.
@@ -747,7 +845,7 @@ void playersPanel()
     }
     ImGui::EndChild();
     ImGui::SameLine();
-    ImGui::BeginChild("player");
+    ImGui::BeginChild("player", ImVec2(0, -g_footerH), 0, ImGuiWindowFlags_HorizontalScrollbar);
     if (g_slot >= 0) {
         const uint32_t rec = slotRec(g_slot), id = rd32(rec);
         if (validPlayer(id)) {
@@ -755,7 +853,8 @@ void playersPanel()
                 ImGui::Text("%s  (선수 ID %u, %d번 칸)", nameOf(g_text.players, (int)id).c_str(), id, g_slot + 1);
             else
                 ImGui::Text("%s  (선수 ID %u, 유스 %d번 칸)", nameOf(g_text.players, (int)id).c_str(), id, g_slot - 22);
-            ImGui::TextDisabled("값을 넣고 적용. 고정이면 1초에 10번 다시 씀, 아니면 한 번. 이 선수가 지금 구단에 있을 때만.");
+            note("값을 넣고 적용. 고정이면 1초에 10번 다시 씀, 아니면 한 번. 이 선수가 지금 구단에 있을 때만. "
+                 "적용 뒤 그 줄 끝에 게임에 들어갔는지 나오고, 안 들어가면 빨간 글씨로 나옵니다.");
             // This player's edits at once (2026-11-09, owner: "모든 치트에 새로고침과 전체적용 고정등의 기능들이 세심하게"):
             // 새로고침 writes the file again so the game puts the once edits in again; 전부 고정 / 전부 한 번만 switch them;
             // 전체 선수에 적용 copies this player's edits to every player of the club; 전부 해제 removes them.
@@ -764,7 +863,7 @@ void playersPanel()
                 for (const PlayerEdit& e : edits)
                     mine += e.id == id;
                 ImGui::TextDisabled("이 선수의 편집 %d개:", mine);
-                ImGui::SameLine();
+                fitSameLine(btnW("새로고침"));
                 if (ImGui::SmallButton("새로고침")) {
                     // The value boxes show the game's current values again (they kept the value of when they were
                     // first drawn; owner screenshot: box 12 while the game had 29), and the once edits are written again.
@@ -781,7 +880,7 @@ void playersPanel()
                     toast("새로고침: 지금 게임 값을 다시 읽고, 한 번만 쓰는 편집을 다시 씀");
                 }
                 for (int lockAll = 1; lockAll >= 0; lockAll--) {
-                    ImGui::SameLine();
+                    fitSameLine(btnW(lockAll ? "전부 고정" : "전부 한 번만"));
                     if (ImGui::SmallButton(lockAll ? "전부 고정" : "전부 한 번만")) {
                         std::vector<PlayerEdit> all = loadPlayerEdits();
                         for (PlayerEdit& e : all)
@@ -793,7 +892,7 @@ void playersPanel()
                         toast(nameOf(g_text.players, (int)id) + (lockAll ? ": 편집 전부 고정" : ": 편집 전부 한 번만"));
                     }
                 }
-                ImGui::SameLine();
+                fitSameLine(btnW("전체 선수에 적용"));
                 if (ImGui::SmallButton("전체 선수에 적용")) {
                     std::vector<PlayerEdit> all = loadPlayerEdits(), source;
                     for (const PlayerEdit& e : all)
@@ -813,7 +912,7 @@ void playersPanel()
                     savePlayerEdits(all);
                     toast("편집 " + std::to_string(source.size()) + "개를 선수 " + std::to_string(players) + "명에게 적용");
                 }
-                ImGui::SameLine();
+                fitSameLine(btnW("전부 해제"));
                 if (ImGui::SmallButton("전부 해제")) {
                     std::vector<PlayerEdit> all = loadPlayerEdits();
                     all.erase(std::remove_if(all.begin(), all.end(), [&](const PlayerEdit& x) { return x.id == id; }), all.end());
@@ -837,10 +936,10 @@ void playersPanel()
                 if (!g_fieldLock.count(key))
                     g_fieldLock[key] = e ? e->lock : false;   // off until asked for (owner, 2026-11-08)
                 ImGui::TextUnformatted(label.c_str());
-                ImGui::SameLine(200);
+                ImGui::SameLine(Px(200));
                 ImGui::TextDisabled("%s", now.c_str());
-                ImGui::SameLine(360);
-                ImGui::SetNextItemWidth(120);
+                ImGui::SameLine(Px(360));
+                ImGui::SetNextItemWidth(Px(120));
                 ImGui::InputInt("##v", &g_fieldInput[key], 1, 10);
                 ImGui::SameLine();
                 bool lk = g_fieldLock[key];
@@ -853,6 +952,7 @@ void playersPanel()
                     all.erase(std::remove_if(all.begin(), all.end(), [&](const PlayerEdit& x) { return x.id == id && x.field == field; }), all.end());
                     all.push_back({id, field, v, g_fieldLock[key]});
                     savePlayerEdits(all);
+                    appliedNow(key);
                     toast(nameOf(g_text.players, (int)id) + " · " + label + " = " + std::to_string(v));
                 }
                 if (e) {
@@ -863,6 +963,12 @@ void playersPanel()
                         savePlayerEdits(all);
                         toast(label + ": 해제");
                     }
+                    // Is the edit in the game? (2026-11-10)
+                    const int state = applyCheck(key, current == e->value, e->lock);
+                    applyStateText(state, "안 들어감: 게임 값 " + std::to_string(current) + (e->lock ? " (고정인데 안 바뀜)" : ""),
+                                   "게임 값 " + std::to_string(current) + " (한 번만 쓴 값 " + std::to_string(e->value) + ")");
+                    warnOnce(key, state, nameOf(g_text.players, (int)id) + " · " + label + ": 게임에 안 들어감 (게임 값 " +
+                                             std::to_string(current) + ", 넣은 값 " + std::to_string(e->value) + ")");
                 }
                 ImGui::PopID();
             };
@@ -870,6 +976,11 @@ void playersPanel()
             // +0x10A u8 the style slot in use (0-4); 5 slots of 0x30 from +0x10C: +0 u32 style (1-66), +4 u32 original
             // skill (113-181, 0 none), 5 skills of 8 bytes from +8: u32 type (1-16), u8 level at +4 (1-7; 0xFF when the
             // type is 0). Written as players.txt fields b/w<offset> (saka_hooks.c), all together, 고정 or once.
+            {
+                static const bool openAll = [] { const char* v = std::getenv("SAKA_OVERLAY_OPEN_ALL"); return v && *v == '1'; }();
+                if (openAll)   // tests: the play style editor open
+                    ImGui::SetNextItemOpen(true, ImGuiCond_Once);
+            }
             if (ImGui::CollapsingHeader("플레이스타일·스킬")) {
                 static uint32_t styleFor = 0;
                 if (g_styleRefresh) {
@@ -958,27 +1069,31 @@ void playersPanel()
                         ImGui::EndCombo();
                     }
                 };
-                ImGui::SetNextItemWidth(120);
+                ImGui::SetNextItemWidth(Px(120));
                 ImGui::SliderInt("쓰는 스타일 칸 (0~4)", &inUse, 0, 4);
                 for (int e = 0; e < 5; e++) {
                     ImGui::PushID(e);
+                    // A slot: label, style, original skill (next line when narrow), then the five skills as many to a
+                    // line as fit (2026-11-10: they ran past the pane's right edge, owner screenshot).
                     ImGui::Text("%d번 칸%s", e + 1, e == inUse ? " (사용 중)" : "");
-                    ImGui::SameLine(110);
-                    styleCombo("##style", &style[e], 330);
-                    ImGui::SameLine();
-                    listCombo("오리지널##orig", &original[e], 113, 181, 300, origLabel);
+                    ImGui::SameLine(std::max(Px(110), ImGui::CalcTextSize("5번 칸 (사용 중)").x + ImGui::GetStyle().ItemSpacing.x));
+                    styleCombo("##style", &style[e], Px(330));
+                    fitSameLine(Px(300) + ImGui::GetStyle().ItemInnerSpacing.x + ImGui::CalcTextSize("오리지널").x);
+                    listCombo("오리지널##orig", &original[e], 113, 181, Px(300), origLabel);
                     for (int k = 0; k < 5; k++) {
                         ImGui::PushID(k);
                         if (k)
-                            ImGui::SameLine();
-                        listCombo("##type", &type[e][k], 1, 16, 250, typeLabel);
+                            fitSameLine(Px(250) + ImGui::GetStyle().ItemSpacing.x + Px(70));
+                        ImGui::BeginGroup();
+                        listCombo("##type", &type[e][k], 1, 16, Px(250), typeLabel);
                         ImGui::SameLine();
                         int lv = level[e][k] >= 1 && level[e][k] <= 7 ? level[e][k] : 1;
-                        ImGui::SetNextItemWidth(70);
+                        ImGui::SetNextItemWidth(Px(70));
                         if (ImGui::SliderInt("##lv", &lv, 1, 7, "Lv%d"))
                             level[e][k] = lv;
                         else if (level[e][k] < 1 || level[e][k] > 7)
                             level[e][k] = lv;
+                        ImGui::EndGroup();
                         ImGui::PopID();
                     }
                     ImGui::PopID();
@@ -1005,6 +1120,7 @@ void playersPanel()
                         }
                     }
                     savePlayerEdits(all);
+                    appliedNow(std::to_string(id) + "style");
                     toast(nameOf(g_text.players, (int)id) + ": 플레이스타일·스킬 적용" + (styleLock ? " (고정)" : " (한 번)"));
                 }
                 ImGui::SameLine();
@@ -1014,13 +1130,45 @@ void playersPanel()
                     savePlayerEdits(all);
                     toast(nameOf(g_text.players, (int)id) + ": 플레이스타일·스킬 수정 해제");
                 }
+                // The style edits against the game (2026-11-10): the first boxes that differ, by name.
+                {
+                    int mine = 0, differ = 0;
+                    bool lock = false;
+                    std::string first;
+                    for (const PlayerEdit& x : edits) {
+                        if (x.id != id || !isStyle(x.field))
+                            continue;
+                        mine++;
+                        lock = lock || x.lock;
+                        const uint32_t off = (uint32_t)std::strtoul(x.field.c_str() + 1, nullptr, 16);
+                        const long long have = x.field[0] == 'b' ? (long long)rd8(rec + off) : (long long)rd32(rec + off);
+                        if (have == x.value || ++differ > 3)
+                            continue;
+                        std::string where = "쓰는 칸";
+                        if (off != 0x10A) {
+                            const uint32_t r = (off - 0x10C) % 0x30;
+                            where = std::to_string((off - 0x10C) / 0x30 + 1) + "번 칸 " +
+                                    (r == 0 ? std::string("스타일") : r == 4 ? std::string("오리지널")
+                                                                            : "스킬" + std::to_string((r - 8) / 8 + 1) + (r % 8 == 4 ? " Lv" : ""));
+                        }
+                        first += (first.empty() ? "" : ", ") + where + " 게임 " + std::to_string(have) + " / 넣은 값 " + std::to_string(x.value);
+                    }
+                    if (mine) {
+                        const std::string key = std::to_string(id) + "style";
+                        const int state = applyCheck(key, differ == 0, lock);
+                        ImGui::TextDisabled("스타일·스킬 편집 %d칸%s", mine, lock ? " (고정)" : "");
+                        applyStateText(state, "안 들어간 칸 " + std::to_string(differ) + "개: " + first,
+                                       "게임 값과 다른 칸 " + std::to_string(differ) + "개 (한 번만 쓴 편집): " + first);
+                        warnOnce(key, state, nameOf(g_text.players, (int)id) + ": 플레이스타일·스킬 " + std::to_string(differ) + "칸이 게임에 안 들어감");
+                    }
+                }
             }
             // Per-player multipliers (owner, 2026-11-09: "이것도 선수별로 개별로도 가능하게 해주고 ... 중복이나 이런 문제가
             // 발생할수 있는것에 대한 방지 대책도"): players.txt xt / xs / xa, read by saka_hooks.c (cheat_mult_for). His value
             // replaces the switch's (never both), one per kind, used only while he is in the club or its youth team.
             if (ImGui::CollapsingHeader("선수별 배수 (이 선수만)", ImGuiTreeNodeFlags_DefaultOpen)) {
-                ImGui::TextDisabled("이 선수에게는 '연습' 분류의 배수 치트 대신 이 값을 씁니다 (둘을 곱하지 않음). 치트가 꺼져 있어도 적용, 1~100.");
-                ImGui::TextDisabled("해제하면 전체 설정을 따릅니다. 구단·유스를 떠난 선수에게는 쓰이지 않습니다.");
+                note("이 선수에게는 '연습' 분류의 배수 치트 대신 이 값을 씁니다 (둘을 곱하지 않음). 치트가 꺼져 있어도 적용, 1~100.");
+                note("해제하면 전체 설정을 따릅니다. 구단·유스를 떠난 선수에게는 쓰이지 않습니다. 배수는 연습·각성 때 쓰여서 여기서 바로 확인되지는 않습니다.");
                 static const struct { const char* field; const char* label; } kMult[] = {
                     {"xt", "일반 연습 배수"}, {"xs", "특별연습·비장의 아이 배수"}, {"xa", "각성 포인트 배수"}};
                 for (const auto& m : kMult) {
@@ -1030,10 +1178,10 @@ void playersPanel()
                     if (!g_fieldInput.count(key))
                         g_fieldInput[key] = e ? (int)e->value : 2;
                     ImGui::TextUnformatted(m.label);
-                    ImGui::SameLine(200);
+                    ImGui::SameLine(Px(200));
                     ImGui::TextDisabled("%s", e ? ("지금 x" + std::to_string(e->value)).c_str() : "전체 설정 따름");
-                    ImGui::SameLine(360);
-                    ImGui::SetNextItemWidth(120);
+                    ImGui::SameLine(Px(360));
+                    ImGui::SetNextItemWidth(Px(120));
                     ImGui::InputInt("##v", &g_fieldInput[key], 1, 10);
                     ImGui::SameLine();
                     if (ImGui::SmallButton("적용")) {
@@ -1074,7 +1222,7 @@ void playersPanel()
             // As the launcher's page: abilities or limits, all 46 at 100 and locked.
             for (int limits = 0; limits < 2; limits++) {
                 if (limits)
-                    ImGui::SameLine();
+                    fitSameLine(btnW("한계 전부 100 고정"));
                 if (ImGui::Button(limits ? "한계 전부 100 고정" : "능력 전부 100 고정")) {
                     const char k = limits ? 'l' : 'a';
                     std::vector<PlayerEdit> all = loadPlayerEdits();
@@ -1089,7 +1237,7 @@ void playersPanel()
                     toast(nameOf(g_text.players, (int)id) + (limits ? ": 한계 전부 100 (고정)" : ": 능력 전부 100 (고정)"));
                 }
             }
-            ImGui::SameLine();
+            fitSameLine(btnW("이 선수 수정 전부 해제"));
             if (ImGui::Button("이 선수 수정 전부 해제")) {
                 std::vector<PlayerEdit> all = loadPlayerEdits();
                 all.erase(std::remove_if(all.begin(), all.end(), [&](const PlayerEdit& x) { return x.id == id; }), all.end());
@@ -1348,7 +1496,12 @@ void listsPanel()
             buildPeople(L, names, d.maxId);
             auto nation = [&](int id) { auto it = g_nationOf[L].find(id); return it != g_nationOf[L].end() ? it->second : -1; };
             // The slots: current name and country; the chosen slot gets the pick.
-            ImGui::BeginChild("slots", ImVec2(460, 0), ImGuiChildFlags_Borders);
+            if (g_resetSlots) {   // 기본 크기
+                g_resetSlots = false;
+                ImGui::SetNextWindowSize(ImVec2(Px(460), 0.0f), ImGuiCond_Always);
+            }
+            ImGui::BeginChild("slots", ImVec2(Px(460), -g_footerH), ImGuiChildFlags_Borders | ImGuiChildFlags_ResizeX,
+                              ImGuiWindowFlags_HorizontalScrollbar);
             for (int s = 0; s < d.slots; s++) {
                 const uint32_t cur = committed(d.addr + d.stride * s, 4) ? rd32(d.addr + d.stride * s) : 0;
                 std::string text = std::to_string(s + 1) + "번  " + (cur ? nameOf(names, (int)cur) + "  · " + nameOf(g_text.nations, nation((int)cur)) : "(비어 있음)");
@@ -1399,7 +1552,7 @@ void listsPanel()
             }
             ImGui::EndChild();
             ImGui::SameLine();
-            ImGui::BeginChild("pick");
+            ImGui::BeginChild("pick", ImVec2(0, -g_footerH), 0, ImGuiWindowFlags_HorizontalScrollbar);
             // Country filter: the countries of this list's people, the most common first.
             std::map<int, int> count;
             for (const auto& pn : g_people[L])
@@ -1407,7 +1560,7 @@ void listsPanel()
             std::vector<std::pair<int, int>> countries(count.begin(), count.end());
             std::sort(countries.begin(), countries.end(), [](const std::pair<int, int>& a, const std::pair<int, int>& b) { return a.second > b.second; });
             const std::string current = g_listNation[L] < 0 ? "전체 국가" : nameOf(g_text.nations, g_listNation[L]);
-            ImGui::SetNextItemWidth(260);
+            ImGui::SetNextItemWidth(Px(260));
             if (ImGui::BeginCombo("국가", current.c_str())) {
                 if (ImGui::Selectable("전체 국가", g_listNation[L] < 0))
                     g_listNation[L] = -1;
@@ -1417,7 +1570,7 @@ void listsPanel()
                 ImGui::EndCombo();
             }
             ImGui::SameLine();
-            ImGui::SetNextItemWidth(260);
+            ImGui::SetNextItemWidth(Px(260));
             ImGui::InputTextWithHint("##search", "이름, 영어 이름 또는 ID", g_listSearch[L], sizeof g_listSearch[L]);
             const std::string search = g_listSearch[L];
             ImGui::TextDisabled("고른 이름이 왼쪽에서 고른 %d번 칸에 들어갑니다.", g_listSlot[L] + 1);
@@ -1495,7 +1648,7 @@ void speedBadgeWindow(unsigned w)
     const int sp = g_saka_user_speed;
     ImGui::SetNextWindowPos(ImVec2(w - 16.0f, 16.0f), ImGuiCond_Always, ImVec2(1.0f, 0.0f));
     ImGui::SetNextWindowBgAlpha(0.55f);
-    ImGui::Begin("##speed", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+    ImGui::Begin("##speed", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings |
                  ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav);
     if (sp > 1)
         ImGui::Text(">> 게임 속도 x%d   (F7 / F8: 끄기)", sp);
@@ -1506,6 +1659,7 @@ void speedBadgeWindow(unsigned w)
 
 void drawMenu(unsigned w, unsigned h)
 {
+    ImGui::GetStyle().FontScaleMain = g_uiScale;   // the menu zoom (Ctrl+wheel, 글자 -/+)
     if (speedBadge())
         speedBadgeWindow(w);
     if (!g_open)
@@ -1523,12 +1677,28 @@ void drawMenu(unsigned w, unsigned h)
     }
     if (g_reload.exchange(false))
         loadCheats();
-    const ImVec2 size(std::min(1400.0f, w * 0.92f), std::min(900.0f, h * 0.9f));
-    ImGui::SetNextWindowSize(size, ImGuiCond_Always);
-    ImGui::SetNextWindowPos(ImVec2(w * 0.5f, h * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    // The window (2026-11-10): first at the old size in the middle, then where the player moves and sizes it
+    // (cheats\overlay.ini); 기본 크기 / 화면 가득 set it again, and a window left outside the screen comes back.
+    static int layout = 0;   // this frame: 1 기본 크기, 2 화면 가득
+    if (layout == 2) {
+        ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f), ImGuiCond_Always);
+        ImGui::SetNextWindowSize(ImVec2((float)w, (float)h), ImGuiCond_Always);
+    } else {
+        const ImGuiCond cond = layout == 1 ? ImGuiCond_Always : ImGuiCond_FirstUseEver;
+        ImGui::SetNextWindowSize(ImVec2(std::min(1400.0f, w * 0.92f), std::min(900.0f, h * 0.9f)), cond);
+        ImGui::SetNextWindowPos(ImVec2(w * 0.5f, h * 0.5f), cond, ImVec2(0.5f, 0.5f));
+    }
+    layout = 0;
+    ImGui::SetNextWindowSizeConstraints(ImVec2(std::min((float)w, 420.0f), std::min((float)h, 260.0f)), ImVec2((float)w, (float)h));
     bool open = true;
-    if (ImGui::Begin("サカつく 치트 메뉴   (F2 · Esc · 패드 L3+R3: 닫기   F7: 2배속   F8: 터보)", &open,
-                     ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings)) {
+    if (ImGui::Begin("サカつく 치트 메뉴   (F2 · Esc · 패드 L3+R3: 닫기   F7: 2배속   F8: 터보)", &open, ImGuiWindowFlags_NoCollapse)) {
+        {
+            const ImVec2 p = ImGui::GetWindowPos(), s = ImGui::GetWindowSize();
+            const ImVec2 q(std::max(std::min(p.x, (float)w - 120.0f), 120.0f - s.x), std::max(0.0f, std::min(p.y, (float)h - 40.0f)));
+            if (q.x != p.x || q.y != p.y)
+                ImGui::SetWindowPos(q);
+        }
+        g_footerH = ImGui::GetFrameHeightWithSpacing() + ImGui::GetStyle().ItemSpacing.y + 1.0f;
         ImGui::TextUnformatted("게임 속도");
         for (int sp : {1, 2, 3, 4, 6}) {
             ImGui::SameLine();
@@ -1538,6 +1708,39 @@ void drawMenu(unsigned w, unsigned h)
         }
         ImGui::SameLine();
         ImGui::TextDisabled("(빠르면 소리가 빨라지거나 끊길 수 있음)");
+        // Zoom and window size at the right end of this line (on the next one when it is full).
+        {
+            const ImGuiStyle& st = ImGui::GetStyle();
+            char pct[16];
+            std::snprintf(pct, sizeof pct, "%d%%", (int)std::lround(g_uiScale * 100.0f));
+            const float total = btnW("글자 -") + ImGui::CalcTextSize(pct).x + btnW("글자 +") + btnW("기본 크기") + btnW("화면 가득") + st.ItemSpacing.x * 4.0f;
+            ImGui::SameLine();
+            if (ImGui::GetContentRegionAvail().x >= total)
+                ImGui::SetCursorPosX(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - total);
+            else
+                ImGui::NewLine();
+            const char* zoomTip = "글자와 칸 크기 (Ctrl+마우스 휠로도 조절, 60~200%)";
+            if (ImGui::SmallButton("글자 -"))
+                zoomBy(-0.1f);
+            ImGui::SetItemTooltip("%s", zoomTip);
+            ImGui::SameLine();
+            ImGui::TextUnformatted(pct);
+            ImGui::SameLine();
+            if (ImGui::SmallButton("글자 +"))
+                zoomBy(0.1f);
+            ImGui::SetItemTooltip("%s", zoomTip);
+            const char* sizeTip = "창은 제목줄을 끌어 옮기고 가장자리·모서리를 끌어 크기 조절. 왼쪽 목록은 오른쪽 테두리를 끌어 넓힘. 다음 실행에도 남음.";
+            ImGui::SameLine();
+            if (ImGui::SmallButton("기본 크기")) {
+                layout = 1;
+                g_resetRoster = g_resetSlots = true;
+            }
+            ImGui::SetItemTooltip("%s", sizeTip);
+            ImGui::SameLine();
+            if (ImGui::SmallButton("화면 가득"))
+                layout = 2;
+            ImGui::SetItemTooltip("%s", sizeTip);
+        }
         ImGui::TextColored(ImVec4(0.55f, 0.85f, 1.0f, 1.0f), "이 설정: %s  (치트·선수·목록 설정은 세이브마다 따로)", profileDesc.c_str());
         // 설치한 시설 수 (owner, 2026-11-09: "어디까지가 최대인지 체크하고 ... 내가 얼마나 설치 했는지를 알아 볼 수 있도록"):
         // the stadium's and the clubhouse's 27 slots (6 bytes, facility ID at +0; 0x00EE7B64 / 0x00EE7C06) are all the
@@ -1595,17 +1798,28 @@ void drawMenu(unsigned w, unsigned h)
             ImGui::EndTabBar();
         }
         firstTab = -1;
+        // The status line (2026-11-10; it was a 3 s toast at the screen's bottom): the last result stays, a warning in
+        // orange; hover it for the earlier ones.
+        ImGui::Separator();
+        if (g_toast.empty())
+            ImGui::TextDisabled("적용·해제 결과가 여기에 남습니다. 게임에 안 들어간 값은 그 줄 끝(빨강)과 여기(주황)에 나옵니다.");
+        else {
+            using namespace std::chrono;
+            const auto now = steady_clock::now();
+            ImGui::TextColored(g_toastLevel ? ImVec4(1.0f, 0.6f, 0.3f, 1.0f) : ImVec4(0.6f, 0.9f, 0.6f, 1.0f), "%s", g_toast.c_str());
+            const bool hover = ImGui::IsItemHovered();
+            ImGui::SameLine();
+            ImGui::TextDisabled("(%lld초 전, 마우스를 올리면 지난 기록)", (long long)duration_cast<seconds>(now - g_toastAt).count());
+            if ((hover || ImGui::IsItemHovered()) && ImGui::BeginTooltip()) {
+                for (auto it = g_toastLog.rbegin(); it != g_toastLog.rend(); ++it)
+                    ImGui::Text("%lld초 전  %s", (long long)duration_cast<seconds>(now - it->first).count(), it->second.c_str());
+                ImGui::EndTooltip();
+            }
+        }
     }
     ImGui::End();
     if (!open)
         setOpen(false);
-    if (!g_toast.empty() && std::chrono::steady_clock::now() - g_toastAt < std::chrono::seconds(3)) {
-        ImGui::SetNextWindowPos(ImVec2(w * 0.5f, h - 40.0f), ImGuiCond_Always, ImVec2(0.5f, 1.0f));
-        ImGui::Begin("##toast", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
-                     ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav);
-        ImGui::TextUnformatted(g_toast.c_str());
-        ImGui::End();
-    }
 }
 
 // ---- ImGui on the live renderer ----------------------------------------------------------------------------
@@ -1644,8 +1858,25 @@ bool init(ID3D12Device* dev, ID3D12CommandQueue* queue, unsigned h)
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
-    io.IniFilename = nullptr;
+    // The menu's place, size, pane widths and zoom (2026-11-10, owner: "자유롭게 안팎으로 조정"), next to the cheat
+    // files; the zoom in its own [SakaOverlay][Main] section.
+    io.IniFilename = "cheats\\overlay.ini";
     io.LogFilename = nullptr;
+    {
+        ImGuiSettingsHandler hd;
+        hd.TypeName = "SakaOverlay";
+        hd.TypeHash = ImHashStr("SakaOverlay");
+        hd.ReadOpenFn = [](ImGuiContext*, ImGuiSettingsHandler*, const char*) -> void* { return (void*)1; };
+        hd.ReadLineFn = [](ImGuiContext*, ImGuiSettingsHandler*, void*, const char* line) {
+            float f = 0.0f;
+            if (std::sscanf(line, "Zoom=%f", &f) == 1 && f >= 0.6f && f <= 2.0f)
+                g_uiScale = f;
+        };
+        hd.WriteAllFn = [](ImGuiContext*, ImGuiSettingsHandler* handler, ImGuiTextBuffer* out) {
+            out->appendf("[%s][Main]\nZoom=%.2f\n\n", handler->TypeName, g_uiScale);
+        };
+        ImGui::AddSettingsHandler(&hd);
+    }
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad;
     io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
     ImGui::StyleColorsDark();
@@ -1736,7 +1967,13 @@ void feedInput(unsigned w, unsigned h)
         case WM_RBUTTONUP: io.AddMouseButtonEvent(1, false); break;
         case WM_MBUTTONDOWN: io.AddMouseButtonEvent(2, true); break;
         case WM_MBUTTONUP: io.AddMouseButtonEvent(2, false); break;
-        case WM_MOUSEWHEEL: io.AddMouseWheelEvent(0.0f, (float)(short)HIWORD(m.wp) / WHEEL_DELTA); break;
+        case WM_MOUSEWHEEL:
+            if (g_open && (LOWORD(m.wp) & MK_CONTROL)) {   // Ctrl+wheel: the menu zoom (2026-11-10)
+                zoomBy((short)HIWORD(m.wp) > 0 ? 0.1f : -0.1f);
+                break;
+            }
+            io.AddMouseWheelEvent(0.0f, (float)(short)HIWORD(m.wp) / WHEEL_DELTA);
+            break;
         case WM_KEYDOWN: case WM_SYSKEYDOWN: case WM_KEYUP: case WM_SYSKEYUP: {
             const bool down = m.msg == WM_KEYDOWN || m.msg == WM_SYSKEYDOWN;
             const ImGuiKey key = vkToKey(m.wp);
