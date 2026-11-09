@@ -52,7 +52,7 @@ $guide = @"
   game\EBOOT.ELF       1.03 업데이트의 복호화된 EBOOT
   game\dev_bdvd\       디스크 (PS3_GAME 등)
   game\dev_hdd0\       1.03 업데이트 (game\BLJM61064\...)
-  game\firmware\       펌웨어 모듈 (libsre, libspurs_jq 등)
+  game\firmware\       libsre_image.bin, libspurs_jq_image.bin (본인 펌웨어의 libsre/libspurs_jq를 복호화·재배치한 이미지, NOTES.md "Run 2–4")
 세이브는 gamedata\ 에 생깁니다. 만드는 법은 README.md 와 NOTES.md (저장소)에 있습니다.
 "@
 if ($WithGame) { $guide = "사카츠쿠 PS3 PC 포트 ($name)`r`n`r`n실행: `"Sakatsuku Launcher.exe`"`r`ngame\ 와 gamedata\ (세이브) 포함본입니다. 본인 PC 이전용이며 다른 사람에게 배포하지 마세요." }

@@ -1309,3 +1309,27 @@ Owner: "선수나 감독 스카우트 목록을 검색할때 영어로도 검색
 - The .bat files are no longer in the repository (`*.bat` in .gitignore). They stay on this PC for building: build_release.bat, build_launcher.bat, make_release.bat and run*.bat.
 - `tools/make_release.ps1` no longer puts run.bat in the release; the launcher starts the game itself.
 - Releases are on GitHub Releases: one zip with `Sakatsuku Launcher.exe` and `build-release\SakatsukuRecomp.exe` + SDL2.dll, and no game data.
+
+## Legend list re-check (2026-11-10, owner: "https://enjoigame.sakura.ne.jp/sakatsuku_2013/index.html 여기서 레전드 선수들 리스트 다시 체크해줘")
+- The site's 94 pages name only three such players, checked against txt_static_data.arch table 0:
+  - 7473 平塚 浪馬 is modelled on 中田英寿 (sensyu_osusume2.html). It was already tagged Nakata.
+  - 7472 河本 鬼茂 is a young-talent pick, a 16-year-old top-class FW. It was already tagged Kamamoto; the site names no model.
+  - 7450 中山 雅史 is the pre-order bonus (sensyu_tokuten.html: 16 with the code, 23 in normal play). It was missing and has been added to `cheats/legends.txt` (167 players now).
+- The 13 helper players for an original club (sensyu_osusume.html) are fictional, not legends.
+- **Second pass** (2026-11-10). Owner: "sheepplus.com/sakatsuku2013, sakatuku7.game-cmr.com/2013/data/model, sakatsuku2013.shiyo.info 여기들을 모두 뒤져봐".
+  - Only GAME-CMR has a model list: in-game name -> real player. It has a Japan page, 50 country pages and a few more pairs on its young-talent page. sheepplus and shiyo only have recommendations and young-talent tips.
+  - The list has 1446 rows. 599 match game IDs in the legend range 6886-7899.
+    - Names were matched exactly.
+    - Japanese one-character typos and 3 rows with swapped columns were matched by hand.
+    - A short name that fits several IDs was given the ID nearest the other IDs from the same country page.
+  - 122 of our earlier tags agree with the site.
+  - Kept: 7356 マルゲッティ stays Materazzi.
+    - The site says Maldini, and its young-talent page adds "たぶん" (probably).
+    - It is a stopper, while 6912 マルティニ (sweeper, captaincy) is Paolo Maldini.
+  - Fixed: 7827 ルイス・ペリーラ is Luís Pereira (Brazil, 1970s).
+    - The Verdy Pereira is 7642 ペリーラ. It sits in a block of J.League foreign players, 7639-7645, with Hašek, Dutra and Salinas.
+  - Added 476 players, labelled "Korean, English".
+    - Latin spellings and Japanese readings come from the opening line of each real player's ja.wikipedia article.
+    - 5 of the name-inferred entries are now confirmed by the site.
+  - Total: 643 players. 638 have a source and 5 are still inferred (Gerd Muller, the Laudrups, the de Boers).
+  - Backups: logs/legends.txt.pre_1110 (before 7450) and logs/legends.txt.pre_1110b (before the second pass).
