@@ -176,8 +176,51 @@ namespace SakatsukuLauncher
             }
         }
         public static Dictionary<int, string> Clubs(Launcher launcher) { return Static(launcher, 4); }
-        public static Dictionary<int, string> Staff(Launcher launcher) { return Static(launcher, 9); }
-        public static Dictionary<int, string> Scouts(Launcher launcher) { return Static(launcher, 10); }
+        // Coach and scout names with a real-person tag (2026-11-13, owner: "코치와 스카우트도 실존 인물들의 이름이 있어야
+        // 해"): cheats\staff_models.txt, "coach|scout<TAB>ID<TAB>label"; "名前 (실존: label)", as the legend tags.
+        static Dictionary<int, string> staffNames, scoutNames;
+        public static Dictionary<int, string> Staff(Launcher launcher)
+        {
+            if (staffNames == null)
+                staffNames = Tagged(launcher, Static(launcher, 9), "coach");
+            return staffNames;
+        }
+        public static Dictionary<int, string> Scouts(Launcher launcher)
+        {
+            if (scoutNames == null)
+                scoutNames = Tagged(launcher, Static(launcher, 10), "scout");
+            return scoutNames;
+        }
+        static Dictionary<int, string> Tagged(Launcher launcher, Dictionary<int, string> names, string kind)
+        {
+            var tagged = new Dictionary<int, string>(names);
+            try
+            {
+                string path = Path.Combine(Cheats.Dir(launcher), "staff_models.txt");
+                if (File.Exists(path))
+                    foreach (string line in File.ReadAllLines(path, Encoding.UTF8))
+                    {
+                        if (line.StartsWith("#"))
+                            continue;
+                        string[] f = line.Split('\t');
+                        int id;
+                        string name;
+                        if (f.Length >= 3 && f[0] == kind && int.TryParse(f[1].Trim(), out id) && f[2].Trim().Length > 0 &&
+                            tagged.TryGetValue(id, out name))
+                            tagged[id] = name + " (실존: " + f[2].Trim() + ")";
+                    }
+            }
+            catch (Exception)
+            {
+            }
+            return tagged;
+        }
+        // Where a name's tag starts (" (레전드: ...)" or " (실존: ...)"), -1 without one.
+        public static int TagPos(string name)
+        {
+            int a = name.IndexOf(" (레전드", StringComparison.Ordinal), b = name.IndexOf(" (실존", StringComparison.Ordinal);
+            return a < 0 ? b : b < 0 ? a : Math.Min(a, b);
+        }
 
         // The 46 abilities of a player record (+0x0C), in record order.
         public static string[] Abilities(Launcher launcher)
@@ -293,6 +336,46 @@ namespace SakatsukuLauncher
                 scouts = Load(launcher) ? Table(0x00E1F6AC, 428, 60, 4, true, 0) : new Dictionary<int, int>();
             return scouts;
         }
+
+        // Grade and age for sorting (2026-11-13, owner: "국적 능력치(등급) 번호 나이 이름순으로 sorting"): coaches +9 rank
+        // (15 SS, 14 S, 13 A by the guides; 11-12 about B, 9-10 about C, 7-8 about D by the blog's lists) and +8 base
+        // age; scouts +8 rank (no age in the master); players' master +0x13 grade (0-14, legends 14) and +0x10 age.
+        static Dictionary<int, int> staffGrade, staffAge, scoutGrade, playerGrade, playerAge;
+
+        static Dictionary<int, int> Players(int field)
+        {
+            Dictionary<int, int> map = Table(0x00C7D6CC, 10000, 0x3C, field, false, 0);
+            foreach (var kv in Table(0x00D9A080, 8082, 0x3C, field, false, 10000))
+                map[kv.Key] = kv.Value;
+            return map;
+        }
+
+        public static Dictionary<int, int> Grades(Launcher launcher, string list)
+        {
+            if (!Load(launcher))
+                return new Dictionary<int, int>();
+            if (list == "coach")
+                return staffGrade ?? (staffGrade = Table(0x00BBA60C, 826, 100, 9, false, 0));
+            if (list == "scout")
+                return scoutGrade ?? (scoutGrade = Table(0x00E1F6AC, 428, 60, 8, false, 0));
+            return playerGrade ?? (playerGrade = Players(0x13));
+        }
+
+        public static Dictionary<int, int> Ages(Launcher launcher, string list)
+        {
+            if (!Load(launcher) || list == "scout")
+                return new Dictionary<int, int>();
+            if (list == "coach")
+                return staffAge ?? (staffAge = Table(0x00BBA60C, 826, 100, 8, false, 0));
+            return playerAge ?? (playerAge = Players(0x10));
+        }
+
+        public static string GradeText(string list, int g)
+        {
+            if (list != "coach")
+                return g.ToString();
+            return (g >= 15 ? "SS" : g == 14 ? "S" : g == 13 ? "A" : g >= 11 ? "B" : g >= 9 ? "C" : g >= 7 ? "D" : "E") + " " + g;
+        }
     }
 
     // cheats\live\state.bin: "SAKA", u32 count, then per range u32 address, u32 size and the bytes (big-endian, as
@@ -368,6 +451,19 @@ namespace SakatsukuLauncher
                 byte[] d = File.ReadAllBytes(path);
                 var state = new LiveState { Time = File.GetLastWriteTime(path), Source = path };
                 state.ranges.Add(new KeyValuePair<uint, byte[]>(SaveBase, d));
+                string sidecar = Path.Combine(Path.GetDirectoryName(path), ".sakatsuku-port", Path.GetFileName(path) + ".edit3");
+                if (File.Exists(sidecar))
+                {
+                    byte[] extra = File.ReadAllBytes(sidecar);
+                    if (extra.Length == 24 + 2 * 0x1A8 && Encoding.ASCII.GetString(extra, 0, 7) == "SKEDIT3" &&
+                        BitConverter.ToUInt64(extra, 8) == EditHash(d, 0, d.Length) &&
+                        BitConverter.ToUInt64(extra, 16) == EditHash(extra, 24, extra.Length - 24))
+                    {
+                        var masters = new byte[2 * 0x1A8];
+                        Buffer.BlockCopy(extra, 24, masters, 0, masters.Length);
+                        state.ranges.Add(new KeyValuePair<uint, byte[]>(0x7FFB0000u, masters));
+                    }
+                }
                 return state;
             }
             catch (Exception)
@@ -414,7 +510,28 @@ namespace SakatsukuLauncher
 
         public static bool ValidPlayer(uint id)
         {
-            return (id > 0 && id < 0x46A2) || (id >= 0x7FFD && id <= 0x7FFF);
+            return (id > 0 && id < 0x46A2) || (id >= 0x7FFB && id <= 0x7FFF);
+        }
+
+        static ulong EditHash(byte[] bytes, int at, int count)
+        {
+            ulong h = 14695981039346656037UL;
+            unchecked { for (int i = at; i < at + count; i++) h = (h ^ bytes[i]) * 1099511628211UL; }
+            return h;
+        }
+
+        public string EditName(uint id)
+        {
+            uint master = id == 0x7FFF ? 0x00EEAFA8u : id == 0x7FFB ? 0x7FFB0000u : id == 0x7FFC ? 0x7FFB01A8u : 0;
+            if (master == 0 || !Has(master, 0x1A8)) return "";
+            var text = new StringBuilder();
+            for (uint i = 0; i < 18; i++)
+            {
+                char c = (char)Read(master + 0x82 + i * 2, 2);
+                if (c == 0) break;
+                text.Append(c);
+            }
+            return text.ToString();
         }
     }
 

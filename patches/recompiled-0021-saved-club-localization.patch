@@ -1,0 +1,33 @@
+--- a/recompiled/ppu_recomp_018.cpp
++++ b/recompiled/ppu_recomp_018.cpp
+@@ -31602,7 +31602,7 @@
+         return;
+ }
+ 
+-void func_0063C160(ppu_context* ctx) {
++static void func_0063C160_original(ppu_context* ctx) {
+     PPU_MM_SNAP
+         uint64_t _cs_29 = ctx->gpr[29];
+         uint64_t _cs_30 = ctx->gpr[30];
+@@ -31716,6 +31716,21 @@
+         ctx->gpr[31] = _cs_31;
+         ctx->gpr[1] = ctx->gpr[1] + (int64_t)(0x90);
+         return;
++}
++
++extern "C" int saka_localized_club_id(uint32_t name_ea);
++void func_0063C160(ppu_context* ctx) {
++    func_0063C160_original(ctx);
++    const uint32_t name_ea = (uint32_t)ctx->gpr[3];
++    const int club = saka_localized_club_id(name_ea);
++    if (club >= 0) {
++        ppu_context lookup = *ctx;
++        lookup.gpr[3] = (uint32_t)club;
++        lookup.gpr[4] = name_ea == 0x00EE27C0u;
++        lookup.gpr[5] = 1; // Native "static name" path, bypasses saved names.
++        func_0063C160_original(&lookup);
++        ctx->gpr[3] = lookup.gpr[3];
++    }
+ }
+ 
+ void func_0063C2DC(ppu_context* ctx) {

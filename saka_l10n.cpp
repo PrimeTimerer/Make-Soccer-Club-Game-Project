@@ -18,6 +18,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
 #include <vector>
 #ifndef WIN32_LEAN_AND_MEAN
 #  define WIN32_LEAN_AND_MEAN
@@ -181,4 +182,68 @@ extern "C" void saka_register_l10n(void)
     ps3_hle_register_ctx(0x317AB7C2u, "UTF16toUTF8",                     l10n_UTF16toUTF8);
     ps3_hle_register_ctx(0xEB3DC670u, "UTF8toSJIS",                      l10n_UTF8toSJIS);
     ps3_hle_register_ctx(0xB53C54FAu, "cellOskDialogSetKeyLayoutOption", osk_SetKeyLayoutOption);
+}
+
+/* An existing save stores its stock club name independently of text tables.
+ * With a text overlay, return the stock table ID only when the saved name is
+ * still the original J-club name. Custom names and save bytes stay untouched.
+ * Original strings: BLJM61064 txt_static_data tables 3/4, IDs 1..40. */
+extern "C" int saka_localized_club_id(uint32_t name_ea)
+{
+    if (name_ea != 0x00EE27C0u && name_ea != 0x00EE27E0u) return -1;
+    static const bool overlay = [] {
+        const char* root = std::getenv("PS3_USRDIR_OVERLAY");
+        return root && *root;
+    }();
+    if (!overlay) return -1;
+    const uint32_t id = rd32(0x00EE28ACu);
+    if (id < 1 || id > 40) return -1;
+    static const char16_t* const names[40][2] = {
+        {u"\u4ed9\u53f0", u"\u30d9\u30ac\u30eb\u30bf\u4ed9\u53f0"}, // 1
+        {u"\u9e7f\u5cf6", u"\u9e7f\u5cf6\u30a2\u30f3\u30c8\u30e9\u30fc\u30ba"}, // 2
+        {u"\u6d66\u548c", u"\u6d66\u548c\u30ec\u30c3\u30ba"}, // 3
+        {u"\u5927\u5bae", u"\u5927\u5bae\u30a2\u30eb\u30c7\u30a3\u30fc\u30b8\u30e3"}, // 4
+        {u"\u67cf", u"\u67cf\u30ec\u30a4\u30bd\u30eb"}, // 5
+        {u"\uff26\u6771\u4eac", u"\uff26\uff23\u6771\u4eac"}, // 6
+        {u"\u5ddd\u5d0e\uff26", u"\u5ddd\u5d0e\u30d5\u30ed\u30f3\u30bf\u30fc\u30ec"}, // 7
+        {u"\u6a2a\u6d5c\uff26\uff2d", u"\u6a2a\u6d5c\uff26\u30fb\u30de\u30ea\u30ce\u30b9"}, // 8
+        {u"\u6e58\u5357", u"\u6e58\u5357\u30d9\u30eb\u30de\u30fc\u30ec"}, // 9
+        {u"\u7532\u5e9c", u"\u30f4\u30a1\u30f3\u30d5\u30a9\u30fc\u30ec\u7532\u5e9c"}, // 10
+        {u"\u65b0\u6f5f", u"\u30a2\u30eb\u30d3\u30ec\u30c3\u30af\u30b9\u65b0\u6f5f"}, // 11
+        {u"\u6e05\u6c34", u"\u6e05\u6c34\u30a8\u30b9\u30d1\u30eb\u30b9"}, // 12
+        {u"\u78d0\u7530", u"\u30b8\u30e5\u30d3\u30ed\u78d0\u7530"}, // 13
+        {u"\u540d\u53e4\u5c4b", u"\u540d\u53e4\u5c4b\u30b0\u30e9\u30f3\u30d1\u30b9"}, // 14
+        {u"\uff23\u5927\u962a", u"\u30bb\u30ec\u30c3\u30bd\u5927\u962a"}, // 15
+        {u"\u5e83\u5cf6", u"\u30b5\u30f3\u30d5\u30ec\u30c3\u30c1\u30a7\u5e83\u5cf6"}, // 16
+        {u"\u9ce5\u6816", u"\u30b5\u30ac\u30f3\u9ce5\u6816"}, // 17
+        {u"\u5927\u5206", u"\u5927\u5206\u30c8\u30ea\u30cb\u30fc\u30bf"}, // 18
+        {u"\u672d\u5e4c", u"\u30b3\u30f3\u30b5\u30c9\u30fc\u30ec\u672d\u5e4c"}, // 19
+        {u"\u5c71\u5f62", u"\u30e2\u30f3\u30c6\u30c7\u30a3\u30aa\u5c71\u5f62"}, // 20
+        {u"\u6c34\u6238", u"\u6c34\u6238\u30db\u30fc\u30ea\u30fc\u30db\u30c3\u30af"}, // 21
+        {u"\u6803\u6728", u"\u6803\u6728\uff33\uff23"}, // 22
+        {u"\u7fa4\u99ac", u"\u30b6\u30b9\u30d1\u30af\u30b5\u30c4\u7fa4\u99ac"}, // 23
+        {u"\u5343\u8449", u"\u30b8\u30a7\u30d5\u30e6\u30ca\u30a4\u30c6\u30c3\u30c9\u5343\u8449"}, // 24
+        {u"\u6771\u4eac\uff36", u"\u6771\u4eac\u30f4\u30a7\u30eb\u30c7\u30a3"}, // 25
+        {u"\u6a2a\u6d5c\uff26\uff23", u"\u6a2a\u6d5c\uff26\uff23"}, // 26
+        {u"\u677e\u672c", u"\u677e\u672c\u5c71\u96c5\uff26\uff23"}, // 27
+        {u"\u5bcc\u5c71", u"\u30ab\u30bf\u30fc\u30ec\u5bcc\u5c71"}, // 28
+        {u"\uff26\uff23\u5c90\u961c", u"\uff26\uff23\u5c90\u961c"}, // 29
+        {u"\u4eac\u90fd", u"\u4eac\u90fd\u30b5\u30f3\u30ac\uff26\uff0e\uff23\uff0e"}, // 30
+        {u"\uff27\u5927\u962a", u"\u30ac\u30f3\u30d0\u5927\u962a"}, // 31
+        {u"\u795e\u6238", u"\u30f4\u30a3\u30c3\u30bb\u30eb\u795e\u6238"}, // 32
+        {u"\u9ce5\u53d6", u"\u30ac\u30a4\u30ca\u30fc\u30ec\u9ce5\u53d6"}, // 33
+        {u"\u5ca1\u5c71", u"\u30d5\u30a1\u30b8\u30a2\u30fc\u30ce\u5ca1\u5c71"}, // 34
+        {u"\u5fb3\u5cf6", u"\u5fb3\u5cf6\u30f4\u30a9\u30eb\u30c6\u30a3\u30b9"}, // 35
+        {u"\u611b\u5a9b", u"\u611b\u5a9b\uff26\uff23"}, // 36
+        {u"\u798f\u5ca1", u"\u30a2\u30d3\u30b9\u30d1\u798f\u5ca1"}, // 37
+        {u"\u5317\u4e5d\u5dde", u"\u30ae\u30e9\u30f4\u30a1\u30f3\u30c4\u5317\u4e5d\u5dde"}, // 38
+        {u"\u9577\u5d0e", u"\uff36\u30fb\u30d5\u30a1\u30fc\u30ec\u30f3\u9577\u5d0e"}, // 39
+        {u"\u718a\u672c", u"\u30ed\u30a2\u30c3\u30bd\u718a\u672c"}, // 40
+    };
+    const char16_t* original = names[id - 1][name_ea == 0x00EE27C0u];
+    for (unsigned i = 0; i < 16; ++i) {
+        if (rd16(name_ea + i * 2) != original[i]) return -1;
+        if (!original[i]) return (int)id;
+    }
+    return -1;
 }

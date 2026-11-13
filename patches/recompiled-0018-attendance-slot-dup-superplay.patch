@@ -1,0 +1,65 @@
+diff --git a/recompiled/ppu_recomp_016.cpp b/recompiled/ppu_recomp_016.cpp
+--- a/recompiled/ppu_recomp_016.cpp
++++ b/recompiled/ppu_recomp_016.cpp
+@@ -355,6 +355,7 @@
+     return (sh >= 64) ? (rs >> 63) : (rs >> sh);
+ }
+ 
++extern "C" void saka_attendance_hook(ppu_context* ctx);   /* saka_hooks.c cheats (2026-11-13) */
+ void func_005763B0(ppu_context* ctx) {
+     PPU_MM_SNAP
+         uint64_t _cs_14 = ctx->gpr[14];
+@@ -1173,6 +1174,7 @@
+         ctx->gpr[4] = ctx->gpr[29] | 0x0;
+         { uint64_t _a = ctx->gpr[3]; uint64_t _r = _a + (uint64_t)(int64_t)(-28040); ctx->gpr[3] = _r; ctx->xer = (ctx->xer & ~(1u << 29)) | ((_r < _a) ? (1u << 29) : 0u); }
+         ctx->lr = 0x00576F7C; func_00540AA0(ctx); DRAIN_TRAMPOLINE(ctx);
++        saka_attendance_hook(ctx);   /* cheat: the user's attendance and its ticket income */
+         ctx->gpr[4] = (int64_t)(int32_t)((uint32_t)0xFA << 16);
+         ctx->gpr[3] = (int64_t)(int32_t)(3);
+         ctx->gpr[4] = vm_read32(ctx->gpr[4] + -0x6D84);
+diff --git a/recompiled/ppu_recomp_001.cpp b/recompiled/ppu_recomp_001.cpp
+--- a/recompiled/ppu_recomp_001.cpp
++++ b/recompiled/ppu_recomp_001.cpp
+@@ -12576,6 +12576,7 @@
+         return;
+ }
+ 
++extern "C" void saka_slot_dup_hook(ppu_context* ctx);   /* saka_hooks.c cheats (2026-11-13) */
+ void func_00071EDC(ppu_context* ctx) {
+     PPU_MM_SNAP
+         uint64_t _cs_24 = ctx->gpr[24];
+@@ -13268,6 +13269,7 @@
+         { int64_t a = (int32_t)ctx->gpr[3]; int64_t b = (int64_t)0; uint32_t cr_val = ((a < b) ? 8 : (a > b) ? 4 : 2) | ((ctx->xer >> 31) & 1u); ctx->cr = (ctx->cr & ~(0xFu << 28)) | (cr_val << 28); }
+         if (((ctx->cr >> 29) & 1)) goto loc_00072AEC;
+         ctx->gpr[4] = vm_read32(ctx->gpr[4] + 0xA0);
++        saka_slot_dup_hook(ctx);   /* cheat: any player into any slot (marker -1) */
+         { int64_t a = (int32_t)ctx->gpr[4]; int64_t b = (int64_t)-1; uint32_t cr_val = ((a < b) ? 8 : (a > b) ? 4 : 2) | ((ctx->xer >> 31) & 1u); ctx->cr = (ctx->cr & ~(0xFu << 28)) | (cr_val << 28); }
+         if (((ctx->cr >> 29) & 1)) goto loc_00072A1C;
+         ctx->gpr[3] = vm_read32(ctx->gpr[27] + 0x98);
+@@ -13303,6 +13305,7 @@
+         { int64_t a = (int32_t)ctx->gpr[3]; int64_t b = (int64_t)0; uint32_t cr_val = ((a < b) ? 8 : (a > b) ? 4 : 2) | ((ctx->xer >> 31) & 1u); ctx->cr = (ctx->cr & ~(0xFu << 28)) | (cr_val << 28); }
+         if (((ctx->cr >> 29) & 1)) goto loc_00072AEC;
+         ctx->gpr[4] = vm_read32(ctx->gpr[4] + 0xA8);
++        saka_slot_dup_hook(ctx);   /* cheat: any player into any slot (marker -1) */
+         { int64_t a = (int32_t)ctx->gpr[4]; int64_t b = (int64_t)-1; uint32_t cr_val = ((a < b) ? 8 : (a > b) ? 4 : 2) | ((ctx->xer >> 31) & 1u); ctx->cr = (ctx->cr & ~(0xFu << 28)) | (cr_val << 28); }
+         if (((ctx->cr >> 29) & 1)) goto loc_00072A1C;
+         ctx->gpr[3] = vm_read32(ctx->gpr[27] + 0xA0);
+diff --git a/recompiled/ppu_recomp_026.cpp b/recompiled/ppu_recomp_026.cpp
+--- a/recompiled/ppu_recomp_026.cpp
++++ b/recompiled/ppu_recomp_026.cpp
+@@ -16968,6 +16968,7 @@
+         { g_trampoline_fn = (void(*)(void*))func_0023B0F4; return; }
+ }
+ 
++extern "C" void saka_superplay_hook(ppu_context* ctx);   /* saka_hooks.c cheats (2026-11-13) */
+ void func_0023B100(ppu_context* ctx) {
+     PPU_MM_SNAP
+         uint64_t _cs_14 = ctx->gpr[14];
+@@ -17225,6 +17226,7 @@
+         ctx->fpr[1] = (ctx->fpr[2] >= 0.0) ? ctx->fpr[1] : ctx->fpr[25];
+         ctx->fpr[1] = ppu_frsp(ctx->fpr[1]);
+         ctx->fpr[1] = ppu_fp_single(ppu_fmul(ctx->fpr[1], ctx->fpr[29]));
++        saka_superplay_hook(ctx);   /* cheat: F6 super play (fpr31 = the roll) */
+         { double a = ctx->fpr[31]; double b = ctx->fpr[1]; uint32_t cr_val = (a != a || b != b) ? 1 : (a < b) ? 8 : (a > b) ? 4 : 2; ctx->cr = (ctx->cr & ~(0xFu << 28)) | (cr_val << 28); }
+         if (((ctx->cr >> 31) & 1)) goto loc_0023B490;
+         goto loc_0023B4EC;

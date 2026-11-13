@@ -1356,3 +1356,99 @@ Owner: "이 F2 내부 인터페이스가 자유롭게 안팎으로 조정가능�
 - **Seen:** bench at the office, L3+R3, shot at 1280x720 (logs\f2layout.png). The roster has a sideways scrollbar, all 5 skills show two to a line, and the status line is at the bottom.
   - Not checked live: dragging, zoom and the ini file. The ini is written within 5 s after a move, resize or zoom, and the bench changed none of them.
 - **Backup:** build-release\SakatsukuRecomp.prev_1309.exe and logs\saka_overlay.cpp.pre_layout.
+
+## Per-player multipliers per training kind, and the user's team in away matches (2026-11-13)
+- **Multipliers.** Owner: "선수별로도 각종 훈련들(기본, 스페셜, 비장의 아이 등)의 배율", "선수배수는 훈련쪽이 아닌 선수들 마다 각각 내가 직접 설정 가능하도록".
+  - players.txt now has xt (기본, normal training), xp (스페셜, SP weekly experience and the SP-end awakening points), xh (비장의 아이: 個性強化 experience and the 能力覚醒 limit rise) and xa (각성 포인트).
+  - The older xs (SP and 秘蔵っ子 together) still counts where xp or xh is not set (cheat_mult_for). F2 and the launcher read it as xp + xh, and their next save writes the new form.
+  - F2 and the launcher have four rows plus a 전부 row (the four at once) in "선수별 배수 (이 선수만)".
+- **Team skill unlimited and no cards in away matches.** Owner: "횟수가 6에서 2로 줄었어 무한이 안돼".
+  - The live log showed 4 uses given back in a home match and none in the next match (an away one, no full-house count).
+  - Cause: the 試合指示 manager's team t is the match engine's team entry t (func_00208AE8: match + 0x334 + t x 0x126C). Its order differs from the match team objects at 0x00F8F158, which match_team_is_user checked.
+  - Fix: a kick-off hook in func_002361EC, right after func_00208AE8 (r3 = entry, r25 = t), records s_engine_user[t]. It follows the team's own pointers:
+    - the entry's +4 is the team data (func_002DDD14 reads its count at +0x58);
+    - the data's +8 points at the team's match team object;
+    - that object's +0 is the club, and the team is the user's when it is 0x100 or u32 0x00EE28AC.
+    - A first guess (data == 0x00EE6C98) was wrong: the data is a heap object.
+    - Bench at kick-off: t0 data 0x100B9E2C -> 0x00F8F158 club 0x100 (user); t1 0x100B9FC4 -> 0x00F9351C club 0x21.
+    - If the club cannot be read, the old check stays.
+  - match_team_is_user, used by switches 19 and 20, uses that record first. Patch recompiled-0015-team-skill-user-side.patch.
+  - The log line "[cheats] kick-off: engine team t ... -> user/other" shows the result in every match.
+- **Builds.** The game and the launcher were running, so the builds are `build-release\SakatsukuRecomp.new.exe` and `Sakatsuku Launcher.new.exe`.
+  - The running exe was renamed for the link and put back.
+  - Swap them in after the game is closed. Backups: prev_0201 and Launcher prev_0434.
+- **Foreign limit at the month start** (2026-11-13). Owner: "베켄바우어를 영입하고 다음달 되니까 여기서 방출을 해도 진행이 안돼".
+  - The personnel menu func_0037D2F4 asks to release max(players - 23, foreigners - limit). It shows this with menu_jinji_information_text 1300 / 1301 (あと○人自由契約にしてください。その内、外国籍選手を○人…).
+  - The limits come from func_00583EAC(&foreign, &special, club), not from func_00584388, which switch 3's free-slot hook covers.
+  - Hooks at func_00583EAC's entry (the club, r5) and exit (r30 / r31 point at the limits): for the user's club (0x100, u32 0x00EE28AC or u32 0x00EE2934) both become at least 23 while switch 3 is on. Only a squad over 23 then has to be cut.
+  - The same limits serve signings and youth promotion (11101 外国籍選手枠に空きがないため). Patch recompiled-0016-foreign-limit.patch.
+  - Not seen live yet: the bench does not reach the month-start menu.
+- **Deployed 2026-11-13 after the game was closed:** the game exe (multipliers, team side, foreign limit; backup prev_0201) and the launcher (backup prev_0434).
+
+## Blurred cut-scenes: GPU depth resolve (2026-11-13)
+Owner: "경기 시작전 그리고 각종 경기중 이벤트 스크립트들이 작동할때 뿌옇네".
+
+The match's depth of field works in three steps:
+- It resolves its 2560x1440 depth (zeta 0x012C0000) at half size into 0x00B40000. This is a scaled NV3089 blit in two tiles, 2044 and 516 source columns.
+- It reads 0x00B40000 back as an A8R8G8B8 texture with remap 0xAA93 (x = A, y = R, z = G: the depth's three bytes).
+- The composite into 0x03D40000 (draw ~369) mixes the sharp 0x00F00000 and the 320x180 blur by that depth.
+
+The depth exists only on the GPU, and that blit had no GPU path:
+- The NV3089 code skipped it (stale guest bytes).
+- The colour resolve took the left tile out of 0x00F00000, whose loose range reaches 0x012C0000.
+- So every pixel read as out of focus.
+
+Found with:
+- LD_ZETA_TEX_LOG=1, a new diagnostic for texture binds over a zeta's address (format, remap, host or guest);
+- RSX_DRAW_CSV with a gate, LD_SURF_DUMP and LD_HLSL_DUMP (LD_NO_PSO_LIBRARY=1 so that every shader is dumped).
+
+Fix (patches/0024-depth-resolve-gpu.patch):
+- rsx_live_draw_depth_resolve_blit draws the zeta's R32F snapshot over the source rect into a live R8G8B8A8 surface at the destination, as wide as its rows (pitch / 4).
+- The surface holds the order the shader expects after the remap: R = depth 23-16, G = 15-8, B = 7-0. A live surface is sampled without the remap.
+- cellGcmSys tries it before the colour resolve whenever the source is a live zeta.
+- LD_DEPTH_RESOLVE=0 turns it off.
+
+Seen on the bench:
+- The pre-match stadium shot is sharp. Before, all of it was blurred, and 0x03D40000 was the 320x180 blur scaled up.
+- 0x00B40000 holds the stands and pitch depth.
+- Normal play is unchanged (logs\zt9_full.png, zt10_full.png).
+
+Deployed 2026-11-13; backup build-release\SakatsukuRecomp.prev_1623.exe.
+
+## Staff real names, sorting, staff editor, training slots, more cheats (2026-11-13)
+Owner: "코치와 스카우트도 실존 인물들의 이름이 있어야 해" (and use Scrapling), "국적 능력치(등급) 번호 나이 이름순으로 sorting", "코치와 스카우트들의 능력치 ... 특능 ... 계약기간 나이", "관중수도 999999까지", "슈퍼플레이 ... 버튼을 눌러서", "유스도 훈련배수", "불만도도 All Zero", "충성도도 ... 맥스고정", "비장의 아이 ... 모든 슬롯을 쓰는 중복", "F2에서 고정", "스페셜 훈련도 1턴에", "F2에서 내가 훈련도 지정", "100% 훈련성공", "REA의 활용". REA Ghidra (re/decomp_all.c) analyses ran as read-only Sonnet agents.
+- **Coach real names:** cheats/staff_models.txt, "coach|scout<TAB>ID<TAB>label"; launcher and F2 show "名前 (실존: ...)". 183 from the fan blog "サカつく2013日記" (maguron, Ameba, 2014; its France/Italy/Spain/South America/Germany/other-country manager lists, found with Scrapling), matched to coach table 9 (12 blog typos to the nearest name); 16 more estimated by name only, labelled "추정". Scouts: no source names real models (maguron, Sheep+, shiyo.info, GAME-CMR, spoiler.jp checked). Scrapling's HTTP fetch fails on Shift_JIS/EUC-JP pages and its browser does not start here; those pages were read with curl.
+- **Master fields (verified):** coach 0x00BBA60C + id x 100: +8 base age, +9 rank (15 SS, 14 S, 13 A; B/C/D overlap 7-12), +0xA policy point, +0xB policy circle 0-3, +0x18..+0x1F systems 3-4-3..5-4-1, +0x2C eight ability ids (data/text2/staff_sp_name.txb; Hiddink's match Sheep+). Scout 0x00E1F6AC + id x 60: +8 rank, +0x1C eight ability ids. Player master +0x10 base age, +0x13 grade 0-14 (Messi 14, Iniesta 13, Kagawa 11); roster record +4 is the awakening level, not a grade.
+- **Hired staff:** coach 0x00EE2940, scout 0x00EE6CF8: +0 id, +4 age, +5 contract years, +8 salary (万), +0xC flags (bit 0 leaving). The game reads the effects from the master by id each time, so the F2 "스태프" tab (staff.txt per save, saka_hooks.c cheats_staff_apply) writes the master record for the hired id.
+- **Sorting:** F2 club list (in the club's 23 and the youth's 15) and the F2/launcher name pickers: 번호 (ID / slot), 이름, 국적, 등급, 나이, 역순; the lines show country, grade, age.
+- **Training slots (data limit 3 each):** SP 0x00EE83A8 (3 x 0xC), 秘蔵っ子 0x00EE83CC (3 x 0x20), back to back with other save data after them. F2 "연습" tab: player + course (txt_practice_data tables 0 SP, 2 個性強化, 6 能力覚醒) per slot, lock = refill whenever the slot differs (training.txt per save, cheats_training_apply; no cost charged; the game's assign functions are not called because they clear the report records). Switch 22 SLOT DUPLICATE: func_00071EDC's slot markers (+0x444 / +0x43C) read as -1. Switch 26 SP 1 WEEK FULL: weeks set to 1 before the weekly pass, that week's experience times the weeks left (r30 slot index, r29 slot). SP has no failure roll; 秘蔵っ子 success stays switch 4 (it can still miss when the player already owns the first outcome).
+- **Other switches:** 21 ATTENDANCE (after the gate income func_00540AA0, whose int32 products overflow above ~536,870: total set to the value, ticket income 0x00F9927C scaled with 64-bit math); 23 SUPER PLAY F6 (func_0023B100's per-candidate roll: the user's team succeeds, the other team fails, for 20 s after F6; needs a candidate skill in that play); 24 NO DISSATISFACTION (0x00EEB808 + slot x 0xD0: 0x4 salary, 0x1 player, 0x2 manager, 0x8/0x10/0x20 usage, 0x80 clubhouse; cleared after the monthly judge func_00589B48 as func_0058877C does, plus data codes; live: the salary bit was on for the four players the coach meant); 25 LOYALTY MAX (record +0x200 u16 0-100, after func_005680B8 / func_00568380); youth growth func_005161F0 now takes the training multiplier (six calls).
+- **EDIT players:** the game has one edit id 0x7FFF and one name/face block 0x00EEAFA8 (FUN_00495E54, FUN_004C9EF4; the limit in func_0052F810 / func_0053440C / func_0052F8D4). Lifting the limit alone would give several players the same id and face; not done, the owner chooses how.
+- Patches: recompiled-0017-youth-mult, -0018-attendance-slot-dup-superplay, -0019-dissatisfaction-loyalty.
+- **Not verified live:** attendance on a home match result screen, the super play scene, youth growth with a multiplier, the training lock across a course end, staff edits in the hire/detail screens.
+
+## Continuation: three reusable EDIT players, Korean text and hair (2026-11-13)
+
+The owner chose **up to three** after the previous session stopped, then clarified that newly created library players must remain reusable. Scope also includes the pending rendering/text corrections, especially one-character player names and Tokyo Verdy. Earlier edits are retained; the original game files and owner's saves were not modified. Pre-continuation source/exe backups are under `logs/resume_1113_backup`, `SakatsukuRecomp.prev_resume1113.exe` and `Sakatsuku Launcher.prev_resume1113.exe`.
+
+- **EDIT lifetime:** `saka_edit_players.c` assigns own-club IDs 7FFF / 7FFB / 7FFC, leaving opponent-team IDs 7FFD / 7FFE alone. Native master lookup, negotiation, release and name/classification paths recognize all three. Each signing copies a library entry; it never consumes or rewrites `PLED.DAT`. A fourth signing is blocked. Releasing one extra player preserves the other masters and permits reuse.
+- **Persistence:** the native MAIN file format stays unchanged. Two extra 424-byte masters are written atomically to the sibling `.sakatsuku-port/MAINnn.DAT.edit3`, with hashes binding the payload to that exact MAIN file. Keep this folder when copying/backing up a save. Mismatched sidecars are rejected. F2 and the launcher read the extra names from live exports or validated save sidecars. Patches: `recompiled-0020-edit-players.patch`, `0025-edit-save-sidecars.patch`.
+- **EDIT evidence:** `test_edit_players.c` passes three independent imports, fourth-player blocking, unchanged library bytes, release/rehire, save-slot isolation and stale-sidecar rejection. Native menu import logged `library copied to ID 7FFC (roster mask 3); library retained`. A disposable three-player save was saved through the game's menu and loaded after process restart: IDs 7FFF/7FFB/7FFC and names EDIT A/B/C survived independently. `PLED.DAT` SHA256 stayed `cf838b0d3d519234a0cde3ee7aa0ab4c898d7ece382150fd1c7d6ca2fcd8cf65`. Captures: `logs/edit3_roster_final.bmp`; runtime logs: `edit3final02`, `edit3reload`.
+- **Match fixture:** the three-player fixture now clones an already contracted roster record into occupied slots; a raw PLED candidate lacks the registration state needed to start a match. This preserves the original roster count/formation references. The two-player import fixture still uses library candidates. With the corrected three-player fixture, the native match start menu and kick-off initialized successfully (`logs/edit3match_err.txt`, both engine team pointers resolved; no PSO/decode failures). Live play reached the first-half 45:14 mark, with Tokyo Verdy and player names rendered correctly (`logs/edit3_match_final.bmp`).
+- **Korean:** `korean_refine.py` corrects 1,150 strings in 12 overlay files, including shortened player names, Tokyo Verdy's squad, the 40 J-club full/short names and football/menu terms. `korean_text.py` preserves IDs and the native string-record padding/archive payload size; the rebuilt tables were loaded in game. `korean_menu_assets.py` centers nine main-menu labels within the original sprite bounds, preserving UV metadata and other pixels. Backups: `logs/korean_resume_backup`; change report: `logs/korean_refinement_report.json`. Some original image labels/date headings remain Japanese; this is a targeted v0.8 refinement, not a complete retranslation.
+- **Existing club saves:** the native club-name getter 0063C160 returns saved UTF-16BE names at EE27C0/EE27E0, bypassing translated tables. The display hook uses the translated stock table only if the stored name still exactly matches that club's original name and an overlay is enabled. Custom names/save bytes stay intact. `test_club_names.cpp` passes overlay on/off and custom-name preservation. Native capture: `logs/korean_verdy_final.bmp`. Patch: `recompiled-0021-saved-club-localization.patch`. REA Rizin confirms the getter's original branches: `ev_4d7b8591d3c24b654370eb82845a3561a756ee21383c45242afff60020100819`.
+- **Hair/skin:** alpha-to-coverage now follows the RSX sample grid, and polygon depth bias reaches D3D12. Swizzled cubemap faces use the required 128-byte alignment; the old packed face stride sampled padding, producing invalid shader values and black skin dots. Two hairstyles were checked in game (`logs/hair_final.bmp`, `hair_final_second.bmp`); strands and skin are clean. No temporary shader override/NaN substitution remains. Patch: `0026-hair-coverage-cubemap.patch`. Format evidence: REA `ev_bea556eb991547b16b69a8259ffc765d55840e1dd3df5572f95ee0464cda9a34`; alignment reference: RPCS3 `Emu/RSX/Common/TextureUtils.cpp`.
+- **Previous cheat batch:** isolated actual-hook tests pass attendance/income 64-bit scaling, youth multiplier/cap, training lock after a course clears, hired-staff field selection, and F6 user-team selection/expiry with the user as the away team (`logs/pending_cheats_test.txt`). The earlier list of unobserved native event scenes still applies; these checks validate the hooks, not every event animation.
+- **Ready builds:** `build-release/SakatsukuRecomp.exe` and `Sakatsuku Launcher.exe`; launch normally with the Korean patch enabled. Recompiled/runtime patch reverse-checks pass. No release, commit or push was made.
+
+## After the GPT continuation: roster sorting in the launcher, 秘蔵っ子 success by unowned outcome, Korean scope (2026-11-13 evening)
+- Checked GPT's continuation: the deployed exe/launcher match `logs/resume_1113_validation.json`; the earlier hooks (youth, attendance, slot duplicates, F6, dissatisfaction, loyalty, SP 1 week, training/staff edits), the F2 연습/스태프 tabs and the sorting are all still in.
+- **Launcher roster sorting:** the 선수 page's club list (23, then youth 15) sorts by 번호/이름/국적/등급/나이 with 역순, as F2; lines show country and the master grade. Backup `Sakatsuku Launcher.prev_1918.exe` (GPT's).
+- **秘蔵っ子 100%:** switch 4 now sets the roll to the first reachable outcome the player does not yet have (traits: record +0x20C five bytes, edit ids 7FFB-7FFF never 4/5; skills: func_00566314 on the current style slot, skill table 0x94 = PTR 0x008D4A9C[0x94] (0xC bytes: +4 type, +8 level, +9 original); checked on the office dump: player 607's type 16 Lv2 = skill 107). With the old roll of 1 a course repeated by the lock gave nothing from its second run. Split hooks saka_hizo_trait_roll_hook / saka_hizo_skill_roll_hook, patch recompiled-0022-hizo-success-unowned. Backup exe `SakatsukuRecomp.prev_2011.exe` (GPT's).
+- **Korean scope:** text tables are done (99,359 Japanese strings in 150 files; only 2 unseen test strings keep kana, and ng_word.txb, the name filter, has no overlay on purpose). What still shows Japanese is mostly images: UI screen archives sb (88 archives, 185 textures), sb2 (61, 127), sb3 (22 without the network screens, 46); the Korean overlay covers 6 of those archives. The "さん" after the manager's name is in no text table, event file or EBOOT string found so far.
+
+## Korean UI images, main screens (2026-11-13 night, owner: "Main screens first")
+- `tools/korean_ui_labels.py` (needs the project .venv: Pillow with DXT5 writing): per archive and DDS member an approximate region and the Korean text. It finds the label's pixels (alpha above the border's alpha for sprites; contrast against the border colour on panels), restores the background (the border's median colour with its alpha; flat fill; or a patch copied from blank texture nearby), draws the text (Malgun Gothic bold, fitted to the old box, optional slant, vertical stacking, alignment) and re-encodes only the 4x4 DXT5 blocks that changed. A member whose SLLZ data outgrows its slot moves to the end of the PAR (2 KB aligned; only `tex_practice_autorest.dds` so far, checked in game). Sources: the game's file for archives this tool created (`logs/korean_ui/created.txt`), else the Korean patch's overlay kept in `logs/korean_resume_backup`. `--preview` writes before/after PNGs to `logs/korean_ui`.
+- Done (15 archives, 17 textures, ~240 labels): office top bar and money picker (억·만·엔·주·전·후·년차), all training screens (전체 연습 7 items, 자동 휴양 4, 집중육성 비/능력각성 코스/개성강화 코스, 종료 시기), player detail big/small (출전 수·평균 평점·골 수·어시스트 수, 계약·잔여·연봉·성적, 아시아/외국인 쿼터, 우·좌·양), tactics (게임 플랜/자동 휴양 tabs, 교체 슬롯, 대전 상대, game plan screen 30 labels, 공수특), personnel top, coach detail (연봉, 육성·인망·지휘·전술, 중앙/사이드/점유율/속공/후퇴 수비/프레스/커버/플랫, 잔여년), scout detail (14 regions, 선수/교섭/신예/코치, 억/만엔/연봉), schedule (주·전·후, 홈 경기/원정/중립, 영업부 조언, 보유 프로모션, camp note), match result (48 labels: supporters, income report, ranking, match report, 오프사이드/경고(퇴장)/점유율). Terms follow the Korean patch's own text (출전 수, 신예발굴, 비밀협상, 점유율 축구 → 점유율, 후퇴 수비).
+- In game (bench with `PS3_USRDIR_OVERLAY=game\mods\korean`): office bar, training top tabs, 전체 연습, 집중육성, 자동 휴양 (the moved texture) and the personnel top were seen in Korean; the others were checked on the previews only.
+- Left Japanese: the four grunge stamps of the game plan screen (text cut into slanted textured bars), and the screens not in this batch (match-day popups, month start, player profile, team rest, analysis, the rest of the 171 screen archives).

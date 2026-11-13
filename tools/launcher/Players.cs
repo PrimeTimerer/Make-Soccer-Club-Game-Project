@@ -66,6 +66,13 @@ namespace SakatsukuLauncher
                 if (f.Length >= 3 && uint.TryParse(f[0], out id) && long.TryParse(f[2], out value))
                     edits.Add(new PlayerEdit { Id = id, Field = f[1], Value = value, Lock = f.Length < 4 || f[3] != "0" });
             }
+            // xs (특별연습·비장의 아이 together, before 2026-11-13) becomes xp and xh of the same value; the next Save writes them.
+            List<PlayerEdit> older = edits.Where(e => e.Field == "xs").ToList();
+            edits.RemoveAll(e => e.Field == "xs");
+            foreach (PlayerEdit e in older)
+                foreach (string f in new[] { "xp", "xh" })
+                    if (!edits.Any(x => x.Id == e.Id && x.Field == f))
+                        edits.Add(new PlayerEdit { Id = e.Id, Field = f, Value = e.Value, Lock = e.Lock });
             return edits;
         }
 
@@ -85,12 +92,15 @@ namespace SakatsukuLauncher
             Save(launcher, edits);
         }
 
-        // Per-player multipliers (owner, 2026-11-09): xt normal training, xs special training / 秘蔵っ子, xa awakening
-        // points, 1-100. saka_hooks.c uses them instead of the switch's value for that player (never both).
+        // Per-player multipliers (owner, 2026-11-09; per training kind since 2026-11-13: "선수별로도 각종 훈련들(기본,
+        // 스페셜, 비장의 아이 등)의 배율", "선수들 마다 각각 내가 직접 설정"): xt 기본 연습, xp 스페셜 (SP), xh 비장의 아이
+        // (秘蔵っ子), xa 각성 포인트, 1-100. saka_hooks.c uses them instead of the switch's value for that player (never both).
+        // The older xs (SP and 秘蔵っ子 together) is read as xp + xh (Load).
         public static readonly string[][] Multipliers =
         {
-            new[] { "xt", "일반 연습 배수", "연습" },
-            new[] { "xs", "특별연습·비장의 아이 배수", "특별" },
+            new[] { "xt", "기본 연습 (全体練習) 배수", "기본" },
+            new[] { "xp", "스페셜 (特別練習) 배수", "스페셜" },
+            new[] { "xh", "비장의 아이 (秘蔵っ子) 배수", "비장" },
             new[] { "xa", "각성 포인트 배수", "각성" },
         };
 
@@ -219,6 +229,11 @@ namespace SakatsukuLauncher
     public class PlayersPage : PageBase
     {
         int selected = -1;
+        // Roster sorting (2026-11-13, owner: "선수나 코치 스카우트들을 국적 능력치(등급) 번호 나이 이름순으로 sorting"), as the
+        // F2 menu: within the club's 23 and within the youth team's 15; 번호 = the game's slot order, empty slots last.
+        int rosterSort = 0;
+        bool rosterReverse = false;
+        static readonly string[] RosterSortNames = { "번호 순", "이름 순", "국적 순", "등급 순", "나이 순" };
 
         public PlayersPage(MainWindow window) : base(window)
         {
@@ -381,7 +396,13 @@ namespace SakatsukuLauncher
         protected override FrameworkElement Build()
         {
             LiveState state = GameSource.Load(Launcher);
-            Dictionary<int, string> names = GameText.Players(Launcher);
+            Dictionary<int, string> names = new Dictionary<int, string>(GameText.Players(Launcher));
+            if (state != null)
+                foreach (uint id in new uint[] { 0x7FFF, 0x7FFB, 0x7FFC })
+                {
+                    string editName = state.EditName(id);
+                    if (editName.Length > 0) names[(int)id] = editName;
+                }
             string[] abilities = GameText.Abilities(Launcher);
             List<PlayerEdit> edits = PlayerEdits.Load(Launcher);
 
@@ -393,7 +414,8 @@ namespace SakatsukuLauncher
             var roster = new StackPanel();
             var detail = new StackPanel();
             Action<int> show = null;
-            Action drawRoster = delegate
+            Action drawRoster = null;   // assigned below: the sort controls redraw it
+            drawRoster = delegate
             {
                 roster.Children.Clear();
                 // The club's 23 slots (empty ones shown: the numbers are the game's slots), then the youth team's 15
@@ -434,10 +456,68 @@ namespace SakatsukuLauncher
                 }, null, "", new Thickness(0, 0, 0, 8));
                 reload.HorizontalAlignment = HorizontalAlignment.Right;   // owner: "리스트 리프레시는 오른쪽에"
                 roster.Children.Add(reload);
-                summary(0, 23, "구단", 23);
-                for (int slot = 0; slot < 23 + LiveState.YouthSlots; slot++)
+                var sortBox = new ComboBox { Width = 110 };
+                foreach (string s in RosterSortNames)
+                    sortBox.Items.Add(s);
+                sortBox.SelectedIndex = rosterSort;
+                sortBox.SelectionChanged += delegate
                 {
-                    if (slot == 23)
+                    rosterSort = Math.Max(0, sortBox.SelectedIndex);
+                    drawRoster();
+                };
+                var reverseBox = new CheckBox { Content = "역순", IsChecked = rosterReverse, Margin = new Thickness(12, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center };
+                reverseBox.Click += delegate
+                {
+                    rosterReverse = reverseBox.IsChecked == true;
+                    drawRoster();
+                };
+                var sortRow = Ui.Row(Ui.Text("정렬  ", "Caption"), sortBox, reverseBox);
+                sortRow.Margin = new Thickness(0, 0, 0, 8);
+                roster.Children.Add(sortRow);
+                Dictionary<int, int> nationOf = GameData.PlayerNations(Launcher), gradeOf = GameData.Grades(Launcher, "euro");
+                Dictionary<int, string> nations = GameText.Nations(Launcher);
+                Func<Dictionary<int, int>, uint, int> valueOf = delegate(Dictionary<int, int> map, uint pid)
+                {
+                    int v;
+                    return map.TryGetValue((int)pid, out v) ? v : -1;
+                };
+                Func<int, string> bareName = delegate(int slot)
+                {
+                    string n = GameText.Name(names, state.PlayerId(slot));
+                    int tag = GameText.TagPos(n);
+                    return tag >= 0 ? n.Substring(0, tag) : n;
+                };
+                Comparison<int> bySort = delegate(int a, int b)
+                {
+                    bool va = LiveState.ValidPlayer(state.PlayerId(a)), vb = LiveState.ValidPlayer(state.PlayerId(b));
+                    if (va != vb)
+                        return va ? -1 : 1;   // empty slots last
+                    int c = 0;
+                    if (va && rosterSort == 1)
+                        c = string.CompareOrdinal(bareName(a), bareName(b));
+                    else if (va && rosterSort == 2)
+                        c = valueOf(nationOf, state.PlayerId(a)).CompareTo(valueOf(nationOf, state.PlayerId(b)));
+                    else if (va && rosterSort == 3)
+                        c = valueOf(gradeOf, state.PlayerId(b)).CompareTo(valueOf(gradeOf, state.PlayerId(a)));
+                    else if (va && rosterSort == 4)
+                        c = state.Player(b, 5, 1).CompareTo(state.Player(a, 5, 1));
+                    if (c == 0)
+                        c = a.CompareTo(b);
+                    return rosterReverse ? -c : c;
+                };
+                var order = new List<int>();
+                for (int from = 0; from < 23 + LiveState.YouthSlots; from += 23)
+                {
+                    var part = Enumerable.Range(from, Math.Min(23, 23 + LiveState.YouthSlots - from)).ToList();
+                    if (rosterSort != 0 || rosterReverse)
+                        part.Sort(bySort);
+                    order.AddRange(part);
+                }
+                summary(0, 23, "구단", 23);
+                for (int k0 = 0; k0 < order.Count; k0++)
+                {
+                    int slot = order[k0];
+                    if (k0 == 23)
                         summary(23, 23 + LiveState.YouthSlots, "유스", LiveState.YouthSlots);
                     uint id = state.PlayerId(slot);
                     if (!LiveState.ValidPlayer(id))
@@ -453,7 +533,9 @@ namespace SakatsukuLauncher
                     string number = slot < 23 ? (slot + 1).ToString("00") : "유스 " + (slot - 22).ToString("00");
                     uint position = state.Player(slot, 0x204, 4);
                     string pos = position <= 10 ? Positions[position] : "?";
+                    int nat = valueOf(nationOf, id), grade = valueOf(gradeOf, id);
                     var button = Ui.Button(number + "  " + pos.PadRight(3) + "  " + GameText.Name(names, id) + "  ·  " + Age(state, slot) +
+                                           (nat >= 0 ? "  ·  " + GameText.Name(nations, nat) : "") + (grade >= 0 ? "  ·  등급 " + grade : "") +
                                            (count > 0 ? "  ·  수정 " + count : "") + (mult.Length > 0 ? "  ·  배수" + mult : ""),
                                            delegate { show(k); }, slot == selected ? "AccentButton" : null, "");
                     button.HorizontalContentAlignment = HorizontalAlignment.Left;
@@ -531,7 +613,7 @@ namespace SakatsukuLauncher
                 // 선수별 배수 (owner, 2026-11-09: "이것도 선수별로 개별로도 가능하게 ... 중복이나 이런 문제가 발생할수 있는것에 대한
                 // 방지 대책도"): one value per kind (PlayerEdits.Set keeps a field once), used instead of the switch's.
                 var multPanel = new StackPanel();
-                multPanel.Children.Add(Ui.Text("이 선수에게는 '연습' 분류의 배수 치트 대신 이 값을 씁니다 (둘을 곱하지 않음). 치트가 꺼져 있어도 적용, 1~100. 해제하면 전체 설정을 따릅니다. 구단·유스를 떠난 선수에게는 쓰이지 않습니다.", "Caption"));
+                multPanel.Children.Add(Ui.Text("이 선수만의 훈련 배수입니다. 치트의 '육성·연습' 배수 치트와 상관없이 (꺼져 있어도) 이 선수에게는 이 값을 씁니다 (둘을 곱하지 않음), 1~100. 해제하면 전체 설정을 따릅니다. 구단·유스를 떠난 선수에게는 쓰이지 않습니다.", "Caption"));
                 foreach (string[] m in PlayerEdits.Multipliers)
                 {
                     string field = m[0], label = m[1];
@@ -564,6 +646,47 @@ namespace SakatsukuLauncher
                     clear.Padding = new Thickness(8, 1, 8, 1);
                     clear.IsEnabled = edit != null;
                     UIElement[] cells = { Ui.Text(label, "Body"), Ui.Text(edit != null ? "지금 x" + edit.Value : "전체 설정 따름", "Caption"), box, apply, clear };
+                    for (int c = 0; c < cells.Length; c++)
+                    {
+                        Grid.SetColumn(cells[c], c);
+                        var fe = cells[c] as FrameworkElement;
+                        if (fe != null)
+                            fe.VerticalAlignment = VerticalAlignment.Center;
+                        grid.Children.Add(cells[c]);
+                    }
+                    multPanel.Children.Add(grid);
+                }
+                {   // the four at once (2026-11-13)
+                    var grid = new Grid { Margin = new Thickness(0, 6, 0, 2) };
+                    foreach (double w in new double[] { 190, 110, 64, 86, 86 })
+                        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(w) });
+                    var box = new TextBox { Text = "", Width = 58, Margin = new Thickness(0, 0, 6, 0) };
+                    var applyAll = Ui.Button("전부 적용", delegate
+                    {
+                        long value;
+                        if (!long.TryParse(box.Text.Trim(), out value) || value < 1 || value > 100)
+                        {
+                            Window.Toast("전부: 1~100 사이의 숫자를 넣으세요");
+                            return;
+                        }
+                        foreach (string[] m in PlayerEdits.Multipliers)
+                            PlayerEdits.Set(Launcher, id, m[0], value, true);
+                        Window.Toast(GameText.Name(names, id) + " · 훈련 배수 4가지 모두 x" + value);
+                        edits = PlayerEdits.Load(Launcher);
+                        show(slot);
+                    }, null, "");
+                    applyAll.Padding = new Thickness(8, 1, 8, 1);
+                    var clearAll = Ui.Button("전부 해제", delegate
+                    {
+                        foreach (string[] m in PlayerEdits.Multipliers)
+                            PlayerEdits.Set(Launcher, id, m[0], null, false);
+                        Window.Toast(GameText.Name(names, id) + " · 훈련 배수 4가지 해제 (전체 설정 따름)");
+                        edits = PlayerEdits.Load(Launcher);
+                        show(slot);
+                    }, null, "");
+                    clearAll.Padding = new Thickness(8, 1, 8, 1);
+                    clearAll.IsEnabled = mine.Any(e => PlayerEdits.IsMultiplier(e.Field));
+                    UIElement[] cells = { Ui.Text("전부 (위 4가지 한 번에)", "Body"), Ui.Text("", "Caption"), box, applyAll, clearAll };
                     for (int c = 0; c < cells.Length; c++)
                     {
                         Grid.SetColumn(cells[c], c);
@@ -733,12 +856,19 @@ namespace SakatsukuLauncher
 
     public class ListsPage : PageBase
     {
-        // A name's length without its legend tag (GameText.Players), for the search order.
+        // A name's length without its legend / real-person tag (GameText.Players, Staff, Scouts), for the search order.
         static int BaseLength(string name)
         {
-            int tag = name.IndexOf(" (레전드", StringComparison.Ordinal);
+            int tag = GameText.TagPos(name);
             return tag >= 0 ? tag : name.Length;
         }
+
+        static string BaseName(string name)
+        {
+            return name.Substring(0, BaseLength(name));
+        }
+
+        static readonly string[] SortNames = { "번호", "이름", "국적", "등급", "나이" };
 
         public ListsPage(MainWindow window) : base(window)
         {
@@ -754,19 +884,44 @@ namespace SakatsukuLauncher
             var ids = names.Keys.Where(i => i > 0 && i < maxId).OrderBy(i => i).ToList();
             var pickers = new List<ComboBox>();
             int nation = -1; // the country filter: -1 = all
+            // Sorting (2026-11-13, owner: "국적 능력치(등급) 번호 나이 이름순으로 sorting"): 번호 = ID (or the closest
+            // first for an English search); grade and age the highest first; 역순 turns it round.
+            int sortBy = 0;
+            bool reverse = false;
+            Dictionary<int, int> grades = GameData.Grades(Launcher, list), ages = GameData.Ages(Launcher, list);
+            Func<int, string> extra = delegate(int id)   // grade and age after the country (no brackets: chosen() reads the ID's)
+            {
+                int g, a;
+                return (grades.TryGetValue(id, out g) ? "  · 등급 " + GameData.GradeText(list, g) : "") +
+                       (ages.TryGetValue(id, out a) ? "  · " + a + "세" : "");
+            };
             Func<int, string> label = delegate(int id)
             {
                 int n;
-                return GameText.Name(names, id) + "  (" + id + ")" + (nationOf.TryGetValue(id, out n) ? "  · " + GameText.Name(nations, n) : "");
+                return GameText.Name(names, id) + "  (" + id + ")" + (nationOf.TryGetValue(id, out n) ? "  · " + GameText.Name(nations, n) : "") + extra(id);
             };
             Func<int, string> labelRomaji = delegate(int id)   // the romaji the English search matched, after the name
             {
                 int n;
                 string shown = GameText.Name(names, id);
-                int tag = shown.IndexOf(" (레전드", StringComparison.Ordinal);   // the Japanese name only
-                string romaji = NameSearch.Romaji(tag >= 0 ? shown.Substring(0, tag) : shown);
+                string romaji = NameSearch.Romaji(BaseName(shown));   // the Japanese name only
                 return GameText.Name(names, id) + (romaji.Length > 0 ? "  [" + romaji + "]" : "") + "  (" + id + ")" +
-                       (nationOf.TryGetValue(id, out n) ? "  · " + GameText.Name(nations, n) : "");
+                       (nationOf.TryGetValue(id, out n) ? "  · " + GameText.Name(nations, n) : "") + extra(id);
+            };
+            Func<Dictionary<int, int>, int, int> valueOf = delegate(Dictionary<int, int> map, int id)
+            {
+                int v;
+                return map.TryGetValue(id, out v) ? v : -1;
+            };
+            Comparison<int> compare = delegate(int a, int b)
+            {
+                int c = sortBy == 1 ? string.CompareOrdinal(BaseName(GameText.Name(names, a)), BaseName(GameText.Name(names, b)))
+                      : sortBy == 2 ? valueOf(nationOf, a).CompareTo(valueOf(nationOf, b))
+                      : sortBy == 3 ? valueOf(grades, b).CompareTo(valueOf(grades, a))
+                      : sortBy == 4 ? valueOf(ages, b).CompareTo(valueOf(ages, a)) : 0;
+                if (c == 0)
+                    c = a.CompareTo(b);
+                return reverse ? -c : c;
             };
             // A picker lists up to 400 names of the chosen country containing the search text (with neither: all names
             // of the short lists; for the 18,082 players only the chosen one).
@@ -783,7 +938,10 @@ namespace SakatsukuLauncher
                     : inNation.Where(i => names[i].IndexOf(search, StringComparison.CurrentCultureIgnoreCase) >= 0 || i.ToString() == search);
                 if (search.Length == 0 && nation < 0 && ids.Count > 900)
                     shown = new int[0];
-                foreach (int id in shown.Take(400))
+                List<int> order = shown.ToList();
+                if (sortBy != 0 || (reverse && !english))
+                    order.Sort(compare);
+                foreach (int id in order.Take(400))
                     pick.Items.Add(english ? labelRomaji(id) : label(id));
                 if (keep != 0)
                 {
@@ -795,13 +953,11 @@ namespace SakatsukuLauncher
             };
             Func<ComboBox, uint> chosen = delegate(ComboBox pick)
             {
+                // The ID: the bracketed number right before "  · " (the country) or the end; tags have no bare numbers.
                 string text = pick.SelectedItem as string ?? "";
-                int dot = text.LastIndexOf("  · ", StringComparison.Ordinal);
-                if (dot > 0)
-                    text = text.Substring(0, dot);
-                int open = text.LastIndexOf('('), close = text.LastIndexOf(')');
+                var m = System.Text.RegularExpressions.Regex.Match(text, @"\((\d+)\)(?=  · |$)");
                 uint id;
-                return open >= 0 && close > open && uint.TryParse(text.Substring(open + 1, close - open - 1), out id) ? id : 0;
+                return m.Success && uint.TryParse(m.Groups[1].Value, out id) ? id : 0;
             };
             var searchBox = new TextBox { Width = 220 };
             // Countries of this list's people, the most common first.
@@ -869,7 +1025,22 @@ namespace SakatsukuLauncher
                 nation = countryBox.SelectedIndex <= 0 ? -1 : countries[countryBox.SelectedIndex - 1].Key;
                 refill();
             };
-            var searchRow = Ui.Row(Ui.Text("이름 검색 (일본어·영어)  ", "Caption"), searchBox, countryBox);
+            var sortBox = new ComboBox { Width = 90, Margin = new Thickness(16, 0, 0, 0) };
+            foreach (string s in SortNames)
+                sortBox.Items.Add(s + " 순");
+            sortBox.SelectedIndex = 0;
+            sortBox.SelectionChanged += delegate
+            {
+                sortBy = Math.Max(0, sortBox.SelectedIndex);
+                refill();
+            };
+            var reverseBox = new CheckBox { Content = "역순", Margin = new Thickness(12, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center };
+            reverseBox.Click += delegate
+            {
+                reverse = reverseBox.IsChecked == true;
+                refill();
+            };
+            var searchRow = Ui.Row(Ui.Text("이름 검색 (일본어·영어)  ", "Caption"), searchBox, countryBox, sortBox, reverseBox);
             searchRow.Margin = new Thickness(0, 0, 0, 8);
             panel.Children.Insert(0, searchRow);
             // The whole list (2026-11-09, owner: "목록은 새로고침이 가능하게", "전체적용 고정"): 새로고침 puts the once picks

@@ -1,0 +1,23 @@
+diff --git a/recompiled/ppu_recomp_016.cpp b/recompiled/ppu_recomp_016.cpp
+--- a/recompiled/ppu_recomp_016.cpp
++++ b/recompiled/ppu_recomp_016.cpp
+@@ -16422,8 +16422,11 @@
+         return;
+ }
+ 
++extern "C" void saka_foreign_limit_entry(ppu_context* ctx);   /* saka_hooks.c cheats (2026-11-13) */
++extern "C" void saka_foreign_limit_hook(ppu_context* ctx);
+ void func_00583EAC(ppu_context* ctx) {
+     PPU_MM_SNAP
++        saka_foreign_limit_entry(ctx);   /* cheat: the club (r5) */
+         uint64_t _cs_29 = ctx->gpr[29];
+         uint64_t _cs_30 = ctx->gpr[30];
+         uint64_t _cs_31 = ctx->gpr[31];
+@@ -16500,6 +16503,7 @@
+         ctx->gpr[3] = vm_read8(ctx->gpr[5] + 0x6);
+         vm_write32(ctx->gpr[31] + 0x0, ctx->gpr[3]);
+ loc_00583FB4:
++        saka_foreign_limit_hook(ctx);   /* cheat: the user's club's foreign limits (r30, r31) */
+         ctx->gpr[0] = vm_read64(ctx->gpr[1] + 0xA0);
+         ctx->lr = ctx->gpr[0];
+         ctx->gpr[29] = _cs_29;

@@ -205,6 +205,7 @@ add_executable(${PROJECT_NAME}
     main.cpp
     stubs.cpp
     saka_hooks.c
+    saka_edit_players.c
     saka_l10n.cpp
     ${SAKA_OVERLAY_SOURCES}
     ${PS3RECOMP_SCAFFOLD}

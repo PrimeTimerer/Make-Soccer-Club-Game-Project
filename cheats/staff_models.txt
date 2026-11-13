@@ -1,0 +1,206 @@
+# 코치·스카우트 실존 인물 표시: 종류<TAB>ID<TAB>괄호 안에 붙일 이름 (종류 coach = 코치 table 9, scout = 스카우트 table 10).
+# 런처와 F2 메뉴가 "이름 (실존: ...)"으로 보여 줌. 잘못된 줄은 지우거나 고치면 다음 실행부터 반영.
+# 출처: 팬 블로그 "サカつく2013日記" (maguron, Ameba, 2014-01~03)의 나라별 감독 목록 (프랑스·이탈리아·스페인·남미·독일·그 밖)과
+#   본문 (2026-11-13 대조, 게임 이름표 table 9와 맞춤; 블로그의 오타 12개는 가장 가까운 이름으로). 이름 끝 '?'는 블로그도 확실하지 않다고 한 것.
+# 스카우트: 실존 모델 자료를 찾지 못함 (maguron 블로그, Sheep+, sakatsuku2013.shiyo.info, GAME-CMR, spoiler.jp를 찾아봄).
+# 끝의 '# 이름으로 추정' 아래는 출처 없이 게임 이름·국적만 보고 넣은 코치 (잉글랜드·네덜란드 목록은 출처에 없음).
+coach	1	드라간 스토이코비치, Dragan Stojkovic
+coach	10	폴커 핑케, Volker Finke
+coach	57	알렉스 퍼거슨, Alex Ferguson
+coach	58	카를로 안첼로티, Carlo Ancelotti
+coach	59	아르센 벵거, Arsene Wenger
+coach	60	브렌던 로저스, Brendan Rodgers
+coach	61	데이비드 모이스, David Moyes
+coach	62	제라르 울리에, Gerard Houllier
+coach	63	안드레 빌라스보아스, Andre Villas-Boas
+coach	64	스티브 클라크, Steve Clarke
+coach	73	마크 휴스, Mark Hughes
+coach	77	라파엘 베니테스, Rafael Benitez
+coach	78	마틴 오닐, Martin O'Neill
+coach	80	잔프랑코 졸라, Gianfranco Zola
+coach	86	로베르토 디 마테오, Roberto Di Matteo
+coach	88	클로드 퓌엘, Claude Puel
+coach	89	장 티가나, Jean Tigana
+coach	90	디디에 데샹, Didier Deschamps
+coach	91	크리스토프 갈티에, Christophe Galtier
+coach	93	프레데리크 앙토네티, Frederic Antonetti
+coach	94	뤼디 가르시아, Rudi Garcia
+coach	97	크리스티앙 구르퀴프, Christian Gourcuff
+coach	98	레미 가르드, Remi Garde
+coach	99	필리프 몽타니에, Philippe Montanier
+coach	102	장 페르난데스, Jean Fernandez
+coach	103	르네 지라르, Rene Girard
+coach	104	알랭 카사노바, Alain Casanova
+coach	107	프랑시스 질로, Francis Gillot
+coach	108	로랑 블랑, Laurent Blanc
+coach	109	미셸 파봉?, Michel Pavon?
+coach	112	기 라콩브, Guy Lacombe
+coach	114	엘리 보프, Elie Baup
+coach	115	프레데리크 앙츠, Frederic Hantz
+coach	116	랄프 랑닉?, Ralf Rangnick?
+coach	117	브루노 라바디아, Bruno Labbadia
+coach	118	위르겐 클롭, Jurgen Klopp
+coach	119	마르쿠스 기스돌, Markus Gisdol
+coach	120	토르스텐 핑크, Thorsten Fink
+coach	122	토마스 슈나이더?, Thomas Schneider?
+coach	123	토마스 투헬, Thomas Tuchel
+coach	124	펠릭스 마가트, Felix Magath
+coach	126	유프 하인케스, Jupp Heynckes
+coach	128	미르코 슬롬카, Mirko Slomka
+coach	129	크리스티안 슈트라이히, Christian Streich
+coach	130	크리스토프 다움, Christoph Daum
+coach	132	미하엘 비징거, Michael Wiesinger
+coach	134	디터 헤킹, Dieter Hecking
+coach	136	옌스 켈러, Jens Keller
+coach	138	아르민 페, Armin Veh
+coach	139	한스 마이어, Hans Meyer
+coach	142	로베르토 도나도니, Roberto Donadoni
+coach	143	디에고 시메오네, Diego Simeone
+coach	144	스테파노 피올리, Stefano Pioli
+coach	149	에도아르도 레야, Edoardo Reja
+coach	151	마시밀리아노 알레그리, Massimiliano Allegri
+coach	153	세르세 코스미, Serse Cosmi
+coach	155	빈첸초 몬텔라, Vincenzo Montella
+coach	156	잔 피에로 벤투라, Gian Piero Ventura
+coach	159	프란체스코 귀돌린, Francesco Guidolin
+coach	160	주세페 산니노, Giuseppe Sannino
+coach	162	스테파노 콜란투오노, Stefano Colantuono
+coach	163	체사레 프란델리, Cesare Prandelli
+coach	164	잔 피에로 가스페리니, Gian Piero Gasperini
+coach	165	롤란도 마란, Rolando Maran
+coach	167	발테르 젱가, Walter Zenga
+coach	168	안드레아 스트라마치오니, Andrea Stramaccioni
+coach	169	루치아노 스팔레티, Luciano Spalletti
+coach	170	루이지 델네리, Luigi Delneri
+coach	172	블라디미르 페트코비치, Vladimir Petkovic
+coach	173	펩 과르디올라, Pep Guardiola
+coach	174	우나이 에메리, Unai Emery
+coach	175	티토 빌라노바, Tito Vilanova
+coach	176	후안 이그나시오 마르티네스, Juan Ignacio Martinez
+coach	177	키케 산체스 플로레스, Quique Sanchez Flores
+coach	178	조제 모리뉴, Jose Mourinho
+coach	179	미겔 앙헬 로티나, Miguel Angel Lotina
+coach	180	루이스 가르시아, Luis Garcia
+coach	181	마누엘 펠레그리니, Manuel Pellegrini
+coach	182	미첼, Michel
+coach	184	마누엘 프레시아도, Manuel Preciado
+coach	185	마르셀리노 가르시아 토랄, Marcelino Garcia Toral
+coach	186	페페 멜, Pepe Mel
+coach	187	호아킨 카파로스, Joaquin Caparros
+coach	189	미카엘 라우드루프, Michael Laudrup
+coach	191	파코 헤메스, Paco Jemez
+coach	192	호세 루이스 멘딜리바르, Jose Luis Mendilibar
+coach	193	마놀로 히메네스, Manolo Jimenez
+coach	194	에르네스토 발베르데, Ernesto Valverde
+coach	203	호세 안토니오 카마초, Jose Antonio Camacho
+coach	207	미셸 프뢰돔, Michel Preud'homme
+coach	219	로렌스 세라 페레르, Llorenc Serra Ferrer
+coach	230	리카르도 가레카, Ricardo Gareca
+coach	233	페드로 트로글리오, Pedro Troglio
+coach	241	라몬 디아스, Ramon Diaz
+coach	257	조엘 산타나, Joel Santana
+coach	262	루이스 펠리피 스콜라리, Luiz Felipe Scolari
+coach	263	히카르두 고미스, Ricardo Gomes
+coach	265	반데를레이 룩셈부르구, Vanderlei Luxemburgo
+coach	266	헤네 시몽이스, Rene Simoes
+coach	267	조르지뉴, Jorginho
+coach	270	실라스?, Silas?
+coach	287	레오나르도 아스트라다, Leonardo Astrada
+coach	323	월터 스미스, Walter Smith
+coach	329	조르즈 제주스, Jorge Jesus
+coach	337	루이스 아라고네스, Luis Aragones
+coach	344	지쿠, Zico
+coach	345	레오니트 슬루츠키, Leonid Slutsky
+coach	367	안토니오 타피아, Antonio Tapia
+coach	370	로타어 마테우스?, Lothar Matthaus?
+coach	377	피에르 리트바르스키, Pierre Littbarski
+coach	378	홀거 오지에크, Holger Osieck
+coach	419	기 루, Guy Roux
+coach	420	에메 자케, Aime Jacquet
+coach	421	로제 르메르, Roger Lemerre
+coach	424	레몽 도메네크, Raymond Domenech
+coach	426	레날 드누, Raynald Denoueix
+coach	427	필리프 트루시에, Philippe Troussier
+coach	429	폴 르 갱, Paul Le Guen
+coach	430	브뤼노 메추, Bruno Metsu
+coach	431	미셸 이달고, Michel Hidalgo
+coach	432	자크 보네, Jacques Bonnet
+coach	433	토마스 샤프, Thomas Schaaf
+coach	434	위르겐 클린스만, Jurgen Klinsmann
+coach	435	데트마르 크라머, Dettmar Cramer
+coach	436	클라우스 토프묄러, Klaus Toppmoller
+coach	438	헤네스 바이스바일러, Hennes Weisweiler
+coach	439	제프 헤르베르거, Sepp Herberger
+coach	440	헬무트 쇤, Helmut Schon
+coach	441	오트마어 히츠펠트, Ottmar Hitzfeld
+coach	442	오토 레하겔, Otto Rehhagel
+coach	444	라이너 본호프, Rainer Bonhof
+coach	445	페터 노이루러, Peter Neururer
+coach	446	프리트헬름 풍켈, Friedhelm Funkel
+coach	449	에리히 리베크?, Erich Ribbeck?
+coach	450	베른트 슈스터, Bernd Schuster
+coach	451	귀도 부흐발트, Guido Buchwald
+coach	452	다니엘레 아리고니, Daniele Arrigoni
+coach	454	클라우디오 라니에리, Claudio Ranieri
+coach	455	델리오 로시, Delio Rossi
+coach	456	마리오 베레타?, Mario Beretta?
+coach	459	발테르 마차리, Walter Mazzarri
+coach	464	빅토르 무뇨스, Victor Munoz
+coach	465	곤살로 아르코나다, Gonzalo Arconada
+coach	469	안토니 라마예츠, Antoni Ramallets
+coach	471	호세 앙헬 시간다, Jose Angel Ziganda
+coach	472	파비오 카펠로, Fabio Capello
+coach	473	조반니 트라파토니, Giovanni Trapattoni
+coach	474	마르첼로 리피, Marcello Lippi
+coach	488	아스게이르 시귀르빈손, Asgeir Sigurvinsson
+coach	489	데이비드 오리어리, David O'Leary
+coach	492	스벤예란 에릭손, Sven-Goran Eriksson
+coach	495	그레이엄 수네스, Graeme Souness
+coach	499	보 요한손, Bo Johansson
+coach	501	모르텐 올센, Morten Olsen
+coach	509	아르투르 조르즈, Artur Jorge
+coach	510	움베르투 코엘류, Humberto Coelho
+coach	512	발레리 로바노프스키, Valeriy Lobanovskyi
+coach	513	슬라벤 빌리치, Slaven Bilic
+coach	514	즈덴코 베르데니크, Zdenko Verdenik
+coach	515	보라 밀루티노비치, Bora Milutinovic
+coach	516	부야딘 보슈코프, Vujadin Boskov
+coach	517	즈데넥 제만, Zdenek Zeman
+coach	518	카렐 브뤼크너, Karel Bruckner
+coach	523	류보슬라프 페네프, Lyuboslav Penev
+coach	524	크라시미르 발라코프, Krasimir Balakov
+coach	533	올레크 로만체프, Oleg Romantsev
+coach	534	엘레니오 에레라, Helenio Herrera
+coach	535	세사르 루이스 메노티, Cesar Luis Menotti
+coach	536	엑토르 쿠페르, Hector Cuper
+coach	537	마르셀로 비엘사, Marcelo Bielsa
+coach	539	카를로스 비안치, Carlos Bianchi
+coach	540	카를로스 빌라르도, Carlos Bilardo
+coach	542	알피오 바실레, Alfio Basile
+coach	546	우고 페르난데스, Hugo Fernandez
+coach	547	오스카르 타바레스, Oscar Tabarez
+coach	549	프란시스코 마투라나, Francisco Maturana
+coach	550	마리우 자갈루, Mario Zagallo
+coach	552	텔레 산타나, Tele Santana
+coach	553	세바스티앙 라자로니, Sebastiao Lazaroni
+coach	554	카를루스 아우베르투 파헤이라, Carlos Alberto Parreira
+coach	560	에메르송 레앙?, Emerson Leao?
+coach	577	둥가, Dunga
+coach	587	하비에르 아기레, Javier Aguirre
+# 이름으로 추정
+coach	16	추정 네우시뉴 바치스타, Nelsinho Baptista
+coach	66	추정 아브람 그랜트, Avram Grant
+coach	67	추정 해리 레드냅, Harry Redknapp
+coach	74	추정 로이 호지슨, Roy Hodgson
+coach	76	추정 폴 램버트, Paul Lambert
+coach	79	추정 샘 앨러다이스, Sam Allardyce
+coach	82	추정 개러스 사우스게이트, Gareth Southgate
+coach	125	추정 루이 판할, Louis van Gaal
+coach	190	추정 마우리시오 포체티노, Mauricio Pochettino
+coach	205	추정 프랑크 더부르, Frank de Boer
+coach	271	추정 마르셀루 올리베이라, Marcelo Oliveira
+coach	417	추정 매트 버스비, Matt Busby
+coach	418	추정 마르코 판바스턴, Marco van Basten
+coach	477	추정 리뉘스 미헐스, Rinus Michels
+coach	478	추정 거스 히딩크, Guus Hiddink
+coach	576	추정 파울루 호베르투 팔캉, Paulo Roberto Falcao

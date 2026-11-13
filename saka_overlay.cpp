@@ -48,6 +48,8 @@ extern void (*rsx_live_draw_overlay_draw)(void* dev, void* queue, void* list, vo
                                           unsigned width, unsigned height);
 extern int (*cellPad_overlay_hook)(unsigned port, unsigned buttons);
 extern volatile int g_saka_user_speed;   // main.cpp: the game speed (vblank x N), 1 = normal
+int saka_edit_copy_master(uint32_t id, void* out);
+uint32_t saka_edit_master(uint32_t id);
 }
 
 namespace {
@@ -80,8 +82,21 @@ void setSpeed(int speed)
 }
 bool speedBadge();   // below: the speed is up, or was changed in the last 2 s
 
+// F6: super play (2026-11-13, owner: "슈퍼플레이 ... 버튼을 눌러서 마음대로 작동"): saka_hooks.c switch 23 arms the next
+// skill roll of the user's team for 20 s; the badge says so, or that the cheat is off.
+extern "C" int saka_superplay_arm(void);
+std::atomic<int> g_superShownAt{-100000};
+std::atomic<int> g_superArmed{0};
+
 int windowHook(void* hwnd, unsigned msg, uintptr_t wp, intptr_t lp)
 {
+    if ((msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) && wp == VK_F6) {
+        if (!(lp & (1 << 30))) {
+            g_superArmed = saka_superplay_arm();
+            g_superShownAt = (int)GetTickCount();
+        }
+        return 1;
+    }
     if ((msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) && (wp == VK_F7 || wp == VK_F8)) {
         if (!(lp & (1 << 30))) {
             const int want = wp == VK_F7 ? 2 : 6;
@@ -150,7 +165,7 @@ bool committed(uint32_t ea, uint32_t n)
     return VirtualQuery(vm_base + ea, &mbi, sizeof mbi) && mbi.State == MEM_COMMIT &&
            (uint8_t*)mbi.BaseAddress + mbi.RegionSize >= vm_base + ea + n;
 }
-bool validPlayer(uint32_t id) { return (id > 0 && id < 0x46A2u) || (id >= 0x7FFDu && id <= 0x7FFFu); }
+bool validPlayer(uint32_t id) { return (id > 0 && id < 0x46A2u) || (id >= 0x7FFBu && id <= 0x7FFFu); }
 // A button at the right end of the line a tab bar is about to take (2026-11-09, owner: "리스트 리프레시는 오른쪽에
 // 위치해야하고", "팀도 그렇고"; a Trailing tab button sits right after the tabs, not at the right end). Drawn first, then
 // the cursor goes back so the tab bar starts on the same line; the tab bar adds no item over its empty part.
@@ -229,6 +244,9 @@ struct Texts {
     Names players, nations, staff, scouts;
     std::vector<std::string> abilities;
     Names styles, skillTypes, skills;   // data\text2: playstyle_name, skill_type_name, skill_name (.txb)
+    // Training courses (data\text\txt_practice_data.arch: 0 special training, 2 個性強化, 6 能力覚醒) and the staff
+    // abilities (data\text2\staff_sp_name.txb), 2026-11-13.
+    Names spCourses, persCourses, awakCourses, staffAbilities;
     // cheats\playstyles.txt (tools/make_playstyles.py): Korean names, tier (1 base, 2 upper, 3 top) and family (the
     // base style) of each play style from the style master 0x27; Korean names of skill types (and their level-7 name)
     // and original skills (2026-11-09, owner: "번역도 해줘 ... 계열중에서 하이클래스인지도 구분").
@@ -276,6 +294,24 @@ void loadTexts()
         if (it != g_text.players.end() && !label.empty())
             it->second += " (레전드: " + label + ")";
     }
+    // Real-person tags for coaches and scouts (2026-11-13, owner: "코치와 스카우트도 실존 인물들의 이름이 있어야 해"):
+    // cheats\staff_models.txt, "coach|scout<TAB>ID<TAB>label" (as the launcher's GameText.Staff / Scouts).
+    for (const std::string& line : readLines("cheats\\staff_models.txt")) {
+        if (line.empty() || line[0] == '#')
+            continue;
+        const std::vector<std::string> f = split(line, '\t');
+        if (f.size() < 3)
+            continue;
+        Names* names = f[0] == "coach" ? &g_text.staff : f[0] == "scout" ? &g_text.scouts : nullptr;
+        std::string label = f[2];
+        while (!label.empty() && (label.back() == '\r' || label.back() == ' '))
+            label.pop_back();
+        if (!names || label.empty())
+            continue;
+        auto it = names->find(std::atoi(f[1].c_str()));
+        if (it != names->end())
+            it->second += " (실존: " + label + ")";
+    }
     {   // play styles (1-66), skill types (1-16), skills ((type-1)*7+level 1-112, original 113-181)
         std::vector<uint8_t> s = readFile(dataPath("text2\\playstyle_name.txb"));
         g_text.styles = textTable(s, 0);
@@ -301,6 +337,25 @@ void loadTexts()
             g_text.origKo[std::atoi(f[1].c_str())] = f[2];
         }
     }
+    {
+        std::vector<uint8_t> p = readFile(dataPath("text\\txt_practice_data.arch"));
+        if (p.size() > 0x20) {
+            uint32_t n;
+            std::memcpy(&n, &p[0], 4);
+            const size_t start = 0x10 + 4 * (size_t)n;
+            auto table = [&](uint32_t k) {
+                uint32_t off;
+                std::memcpy(&off, &p[0x10 + 4 * k], 4);
+                return textTable(p, start + off);
+            };
+            if (n > 6) {
+                g_text.spCourses = table(0);
+                g_text.persCourses = table(2);
+                g_text.awakCourses = table(6);
+            }
+        }
+        g_text.staffAbilities = textTable(readFile(dataPath("text2\\staff_sp_name.txb")), 0);
+    }
     std::vector<uint8_t> a = readFile(dataPath("text3\\pledit_ability_name.txb"));
     Names ab = textTable(a, 0);
     for (int i = 0; i < 46; i++)
@@ -309,6 +364,14 @@ void loadTexts()
 
 std::string nameOf(const Names& names, int id)
 {
+    if (&names == &g_text.players && (id == 0x7FFF || id == 0x7FFB || id == 0x7FFC)) {
+        uint8_t master[0x1A8];
+        if (saka_edit_copy_master((uint32_t)id, master)) {
+            wchar_t text[19] = {};
+            for (int k = 0; k < 18; ++k) text[k] = (wchar_t)(master[0x82 + k * 2] << 8 | master[0x83 + k * 2]);
+            if (text[0]) return utf8(text, (int)wcslen(text));
+        }
+    }
     auto it = names.find(id);
     return it != names.end() && !it->second.empty() ? it->second : "#" + std::to_string(id);
 }
@@ -316,11 +379,45 @@ std::string nameOf(const Names& names, int id)
 // Nationality from the game's master tables in memory (NOTES.md "Cheats v2"; launcher GameData).
 int playerNation(int id)
 {
+    if (id >= 0x7FFB && id <= 0x7FFF) {
+        uint8_t master[0x1A8];
+        return saka_edit_copy_master((uint32_t)id, master) ? master[2] : -1;
+    }
     const uint32_t ea = id < 10000 ? 0x00C7D6CCu + (uint32_t)id * 0x3Cu : 0x00D9A080u + (uint32_t)(id - 10000) * 0x3Cu;
     return committed(ea + 2, 1) ? (int)rd8(ea + 2) : -1;
 }
 int staffNation(int id) { return committed(0x00BBA60Cu + (uint32_t)id * 100u + 4, 4) ? (int)rd32(0x00BBA60Cu + (uint32_t)id * 100u + 4) : -1; }
 int scoutNation(int id) { return committed(0x00E1F6ACu + (uint32_t)id * 60u + 4, 4) ? (int)rd32(0x00E1F6ACu + (uint32_t)id * 60u + 4) : -1; }
+
+// Grade and age from the master tables, for sorting (2026-11-13, owner: "국적 능력치(등급) 번호 나이 이름순으로 sorting"):
+// coaches 0x00BBA60C (100 bytes: +8 base age, +9 rank: 15 SS, 14 S, 13 A by the guides; 11-12 about B, 9-10 about C,
+// 7-8 about D by the blog's lists, which overlap), scouts 0x00E1F6AC (60 bytes: +8 rank, no age), players' master
+// (0x3C bytes: +0x10 base age, +0x13 grade 0-14, legends 14). -1 when unknown. L: 0 coach, 1 scout, 2 player.
+uint32_t playerMaster(int id) { return id >= 0x7FFB && id <= 0x7FFF ? saka_edit_master((uint32_t)id) : id < 10000 ? 0x00C7D6CCu + (uint32_t)id * 0x3Cu : 0x00D9A080u + (uint32_t)(id - 10000) * 0x3Cu; }
+int personGrade(int L, int id)
+{
+    const uint32_t ea = L == 0 ? 0x00BBA60Cu + (uint32_t)id * 100u + 9 : L == 1 ? 0x00E1F6ACu + (uint32_t)id * 60u + 8 : playerMaster(id) + 0x13;
+    return committed(ea, 1) ? (int)rd8(ea) : -1;
+}
+int personAge(int L, int id)
+{
+    if (L == 1)
+        return -1;
+    const uint32_t ea = L == 0 ? 0x00BBA60Cu + (uint32_t)id * 100u + 8 : playerMaster(id) + 0x10;
+    return committed(ea, 1) ? (int)rd8(ea) : -1;
+}
+std::string gradeText(int L, int g)
+{
+    if (g < 0)
+        return "?";
+    if (L != 0)
+        return std::to_string(g);
+    const char* r = g >= 15 ? "SS" : g == 14 ? "S" : g == 13 ? "A" : g >= 11 ? "B" : g >= 9 ? "C" : g >= 7 ? "D" : "E";
+    return std::string(r) + "(" + std::to_string(g) + ")";
+}
+// Where a name's added tag starts (" (레전드: ...)" or " (실존: ...)"), npos without one.
+size_t tagPos(const std::string& s) { return std::min(s.find(" (레전드"), s.find(" (실존")); }
+const char* const kSortNames[5] = {"번호", "이름", "국적", "등급", "나이"};
 
 // ---- the cheat files ----------------------------------------------------------------------------------------
 std::vector<std::string> readLines(const char* path)
@@ -499,6 +596,19 @@ std::vector<PlayerEdit> loadPlayerEdits()
         if (f.size() >= 3)
             out.push_back({(uint32_t)std::strtoul(f[0].c_str(), nullptr, 10), f[1], std::atoll(f[2].c_str()), f.size() < 4 || f[3] != "0"});
     }
+    // xs (특별연습·비장의 아이 together, before 2026-11-13) becomes xp (스페셜) and xh (비장의 아이) of the same value; the
+    // next save writes them (saka_hooks.c reads both forms).
+    std::vector<PlayerEdit> older;
+    for (auto it = out.begin(); it != out.end();)
+        if (it->field == "xs") {
+            older.push_back(*it);
+            it = out.erase(it);
+        } else
+            ++it;
+    for (const PlayerEdit& e : older)
+        for (const char* f : {"xp", "xh"})
+            if (std::none_of(out.begin(), out.end(), [&](const PlayerEdit& x) { return x.id == e.id && x.field == f; }))
+                out.push_back({e.id, f, e.value, e.lock});
     return out;
 }
 
@@ -808,9 +918,53 @@ void playersPanel()
     };
     // 새로고침 (2026-11-09, owner: "이 구단 선수 목록도 리프레시가 되어야해"): the list reads the game every frame;
     // this also makes every value box and the play style boxes start again from the game's values.
+    // Sorting (2026-11-13, owner: "선수나 코치 스카우트들을 국적 능력치(등급) 번호 나이 이름순으로 sorting"): within the
+    // club's 23 and within the youth team's 15; 번호 = the game's slot order; empty slots last. Grade = the player
+    // master's +0x13 (0-14: Messi 14, Iniesta 13, Kagawa 11; record +4 is the awakening level), age = record +5.
+    static int rosterSort = 0;
+    static bool rosterRev = false;
+    ImGui::SetNextItemWidth(Px(100));
+    ImGui::Combo("정렬##roster", &rosterSort, kSortNames, 5);
+    ImGui::SameLine();
+    ImGui::Checkbox("역순##roster", &rosterRev);
+    std::vector<int> order;
+    for (int from = 0; from < 38; from += 23) {
+        const int to = from == 0 ? 23 : 38;
+        std::vector<int> v;
+        for (int s = from; s < to; s++)
+            v.push_back(s);
+        if (rosterSort == 0) {
+            if (rosterRev)
+                std::reverse(v.begin(), v.end());
+        } else
+            std::stable_sort(v.begin(), v.end(), [&](int a, int b) {
+                const uint32_t ia = rd32(slotRec(a)), ib = rd32(slotRec(b));
+                const bool va = validPlayer(ia), vb = validPlayer(ib);
+                if (va != vb)
+                    return va;   // empty slots last
+                if (!va)
+                    return a < b;
+                int c = 0;
+                if (rosterSort == 1) {
+                    const std::string na = nameOf(g_text.players, (int)ia), nb = nameOf(g_text.players, (int)ib);
+                    const std::string ba = na.substr(0, std::min(tagPos(na), na.size())), bb = nb.substr(0, std::min(tagPos(nb), nb.size()));
+                    c = ba < bb ? -1 : ba > bb ? 1 : 0;
+                } else if (rosterSort == 2)
+                    c = playerNation((int)ia) - playerNation((int)ib);
+                else if (rosterSort == 3)   // grade (the master's, as the lists): the highest first
+                    c = personGrade(2, (int)ib) - personGrade(2, (int)ia);
+                else   // age (record +5): the oldest first
+                    c = (int)rd8(slotRec(b) + 5) - (int)rd8(slotRec(a) + 5);
+                if (c == 0)
+                    c = a - b;
+                return rosterRev ? c > 0 : c < 0;
+            });
+        order.insert(order.end(), v.begin(), v.end());
+    }
     summary(0, 23, "구단", 23);
-    for (int s = 0; s < 38; s++) {
-        if (s == 23) {
+    for (size_t k = 0; k < order.size(); k++) {
+        const int s = order[k];
+        if (k == 23) {
             if (!haveYouth)
                 break;
             ImGui::Separator();
@@ -829,16 +983,18 @@ void playersPanel()
         for (const PlayerEdit& e : edits) {
             if (e.id != id)
                 continue;
-            if (e.field == "xt" || e.field == "xs" || e.field == "xa")
-                mult += std::string(mult.empty() ? "  ·  배수" : "") + (e.field == "xt" ? " 연습x" : e.field == "xs" ? " 특별x" : " 각성x") +
+            if (e.field == "xt" || e.field == "xp" || e.field == "xh" || e.field == "xa")
+                mult += std::string(mult.empty() ? "  ·  배수" : "") +
+                        (e.field == "xt" ? " 기본x" : e.field == "xp" ? " 스페셜x" : e.field == "xh" ? " 비장x" : " 각성x") +
                         std::to_string(e.value);
             else
                 n++;
         }
-        char line[220];
+        char line[320];
         const int pos = posOf(s);
-        std::snprintf(line, sizeof line, "%s%02d  %-3s  %s  ·  %u세%s%s##slot%d", s < 23 ? "" : "유스 ", s < 23 ? s + 1 : s - 22,
-                      pos >= 0 ? kPos[pos] : "?", nameOf(g_text.players, (int)id).c_str(), rd8(slotRec(s) + 5),
+        std::snprintf(line, sizeof line, "%s%02d  %-3s  %s  ·  %u세  ·  %s  ·  등급 %d%s%s##slot%d", s < 23 ? "" : "유스 ",
+                      s < 23 ? s + 1 : s - 22, pos >= 0 ? kPos[pos] : "?", nameOf(g_text.players, (int)id).c_str(),
+                      rd8(slotRec(s) + 5), nameOf(g_text.nations, playerNation((int)id)).c_str(), personGrade(2, (int)id),
                       n ? ("  ·  수정 " + std::to_string(n)).c_str() : "", mult.c_str(), s);
         if (ImGui::Selectable(line, g_slot == s))
             g_slot = s;
@@ -1167,10 +1323,13 @@ void playersPanel()
             // 발생할수 있는것에 대한 방지 대책도"): players.txt xt / xs / xa, read by saka_hooks.c (cheat_mult_for). His value
             // replaces the switch's (never both), one per kind, used only while he is in the club or its youth team.
             if (ImGui::CollapsingHeader("선수별 배수 (이 선수만)", ImGuiTreeNodeFlags_DefaultOpen)) {
-                note("이 선수에게는 '연습' 분류의 배수 치트 대신 이 값을 씁니다 (둘을 곱하지 않음). 치트가 꺼져 있어도 적용, 1~100.");
+                note("이 선수만의 훈련 배수입니다. 치트 탭의 '육성·연습' 배수 치트와 상관없이 (꺼져 있어도) 이 선수에게는 이 값을 씁니다. "
+                     "둘을 곱하지 않음, 1~100.");
                 note("해제하면 전체 설정을 따릅니다. 구단·유스를 떠난 선수에게는 쓰이지 않습니다. 배수는 연습·각성 때 쓰여서 여기서 바로 확인되지는 않습니다.");
+                // One value per training kind (2026-11-13, owner: "선수별로도 각종 훈련들(기본, 스페셜, 비장의 아이 등)의 배율",
+                // "선수배수는 훈련쪽이 아닌 선수들 마다 각각 내가 직접 설정 가능하도록").
                 static const struct { const char* field; const char* label; } kMult[] = {
-                    {"xt", "일반 연습 배수"}, {"xs", "특별연습·비장의 아이 배수"}, {"xa", "각성 포인트 배수"}};
+                    {"xt", "기본 연습 (全体練習) 배수"}, {"xp", "스페셜 (特別練習) 배수"}, {"xh", "비장의 아이 (秘蔵っ子) 배수"}, {"xa", "각성 포인트 배수"}};
                 for (const auto& m : kMult) {
                     ImGui::PushID(m.field);
                     const PlayerEdit* e = findEdit(m.field);
@@ -1201,6 +1360,40 @@ void playersPanel()
                             savePlayerEdits(all);
                             toast(std::string(m.label) + ": 해제 (전체 설정 따름)");
                         }
+                    }
+                    ImGui::PopID();
+                }
+                {   // the four at once
+                    ImGui::PushID("xall");
+                    const std::string key = std::to_string(id) + "xall";
+                    if (!g_fieldInput.count(key))
+                        g_fieldInput[key] = 2;
+                    ImGui::TextUnformatted("전부 (위 4가지 한 번에)");
+                    ImGui::SameLine(Px(360));
+                    ImGui::SetNextItemWidth(Px(120));
+                    ImGui::InputInt("##v", &g_fieldInput[key], 1, 10);
+                    auto isMult = [&](const PlayerEdit& x) {
+                        return x.id == id && (x.field == "xt" || x.field == "xp" || x.field == "xh" || x.field == "xa");
+                    };
+                    fitSameLine(btnW("전부 적용"));
+                    if (ImGui::SmallButton("전부 적용")) {
+                        const long long v = std::max(1LL, std::min(100LL, (long long)g_fieldInput[key]));
+                        g_fieldInput[key] = (int)v;
+                        std::vector<PlayerEdit> all = loadPlayerEdits();
+                        all.erase(std::remove_if(all.begin(), all.end(), isMult), all.end());
+                        for (const auto& m : kMult) {
+                            all.push_back({id, m.field, v, true});
+                            g_fieldInput[std::to_string(id) + m.field] = (int)v;
+                        }
+                        savePlayerEdits(all);
+                        toast(nameOf(g_text.players, (int)id) + " · 훈련 배수 4가지 모두 x" + std::to_string(v));
+                    }
+                    fitSameLine(btnW("전부 해제"));
+                    if (ImGui::SmallButton("전부 해제")) {
+                        std::vector<PlayerEdit> all = loadPlayerEdits();
+                        all.erase(std::remove_if(all.begin(), all.end(), isMult), all.end());
+                        savePlayerEdits(all);
+                        toast(nameOf(g_text.players, (int)id) + " · 훈련 배수 4가지 해제 (전체 설정 따름)");
                     }
                     ImGui::PopID();
                 }
@@ -1259,6 +1452,8 @@ char g_listSearch[3][96];
 int g_listNation[3] = {-1, -1, -1};
 int g_listSlot[3] = {0, 0, 0};
 bool g_listLock[3] = {false, false, false};   // off until asked for (owner, 2026-11-08)
+int g_listSort[3] = {0, 0, 0};                 // kSortNames; 0 = ID (or the closest first for an English search)
+bool g_listRev[3] = {false, false, false};     // the other way round (grade and age: the highest first by default)
 
 // The people of each list with their country, built once (the master tables are static data).
 std::vector<std::pair<int, int>> g_people[3];
@@ -1572,6 +1767,11 @@ void listsPanel()
             ImGui::SameLine();
             ImGui::SetNextItemWidth(Px(260));
             ImGui::InputTextWithHint("##search", "이름, 영어 이름 또는 ID", g_listSearch[L], sizeof g_listSearch[L]);
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(Px(110));
+            ImGui::Combo("정렬", &g_listSort[L], kSortNames, 5);
+            ImGui::SameLine();
+            ImGui::Checkbox("역순", &g_listRev[L]);
             const std::string search = g_listSearch[L];
             ImGui::TextDisabled("고른 이름이 왼쪽에서 고른 %d번 칸에 들어갑니다.", g_listSlot[L] + 1);
             if (ImGui::BeginListBox("##names", ImVec2(-1, -1))) {
@@ -1580,7 +1780,8 @@ void listsPanel()
                 const bool english = namesearch::isEnglish(search);
                 static std::string hitsFor[3];
                 static std::vector<std::pair<int, int>> hits[3];   // (score, index into g_people[L])
-                const std::string hitsKey = search + "\x1f" + std::to_string(g_listNation[L]);
+                const std::string hitsKey = search + "\x1f" + std::to_string(g_listNation[L]) + "\x1f" +
+                                            std::to_string(g_listSort[L]) + (g_listRev[L] ? "r" : "");
                 if (hitsFor[L] != hitsKey) {
                     hitsFor[L] = hitsKey;
                     hits[L].clear();
@@ -1599,17 +1800,44 @@ void listsPanel()
                             break;   // 18,082 players: pick a country or search first
                         hits[L].push_back({sc, (int)p});
                     }
-                    if (english)   // the closest first, then the shorter name
+                    const int sortBy = g_listSort[L];
+                    if (sortBy != 0) {   // 이름 / 국적 / 등급 / 나이, then the ID; grade and age the highest first
+                        auto bare = [&](int person) {   // the name without its tag
+                            const std::string& s = names.at(person);
+                            return s.substr(0, std::min(tagPos(s), s.size()));
+                        };
+                        const bool high = sortBy >= 3;
+                        std::stable_sort(hits[L].begin(), hits[L].end(), [&](const std::pair<int, int>& a, const std::pair<int, int>& b) {
+                            const auto& pa = g_people[L][a.second];
+                            const auto& pb = g_people[L][b.second];
+                            int c = 0;
+                            if (sortBy == 1) {
+                                const std::string na = bare(pa.first), nb = bare(pb.first);
+                                c = na < nb ? -1 : na > nb ? 1 : 0;
+                            } else if (sortBy == 2)
+                                c = pa.second - pb.second;
+                            else {
+                                const int va = sortBy == 3 ? personGrade(L, pa.first) : personAge(L, pa.first);
+                                const int vb = sortBy == 3 ? personGrade(L, pb.first) : personAge(L, pb.first);
+                                c = high ? vb - va : va - vb;
+                            }
+                            if (c == 0)
+                                c = pa.first - pb.first;
+                            return g_listRev[L] ? c > 0 : c < 0;
+                        });
+                    } else if (english)   // the closest first, then the shorter name
                         std::stable_sort(hits[L].begin(), hits[L].end(), [&](const std::pair<int, int>& a, const std::pair<int, int>& b) {
                             if (a.first != b.first)
                                 return a.first < b.first;
                             auto base = [&](int person) {   // without the legend tag
                                 const std::string& s = names.at(person);
-                                const size_t tag = s.find(" (레전드");
+                                const size_t tag = tagPos(s);
                                 return tag == std::string::npos ? s.size() : tag;
                             };
                             return base(g_people[L][a.second].first) < base(g_people[L][b.second].first);
                         });
+                    else if (g_listRev[L])
+                        std::reverse(hits[L].begin(), hits[L].end());
                 }
                 int shown = 0;
                 for (const auto& hit : hits[L]) {
@@ -1621,9 +1849,11 @@ void listsPanel()
                     const int n = pn.second;
                     if (++shown > 400)
                         break;
-                    const size_t tag = kv.second.find(" (레전드");   // the brackets: the Japanese name's romaji only
+                    const size_t tag = tagPos(kv.second);   // the brackets: the Japanese name's romaji only
+                    const int grade = personGrade(L, kv.first), age = personAge(L, kv.first);
                     const std::string item = kv.second + (english ? "  [" + namesearch::romaji(kv.second.substr(0, tag)) + "]" : std::string()) +
-                                             "  (" + std::to_string(kv.first) + ")  · " + nameOf(g_text.nations, n);
+                                             "  (" + std::to_string(kv.first) + ")  · " + nameOf(g_text.nations, n) +
+                                             "  · 등급 " + gradeText(L, grade) + (age >= 0 ? "  · " + std::to_string(age) + "세" : std::string());
                     if (ImGui::Selectable(item.c_str())) {
                         edits.erase(std::remove_if(edits.begin(), edits.end(), [&](const ListEdit& e) { return e.list == d.list && e.slot == g_listSlot[L]; }), edits.end());
                         edits.push_back({d.list, g_listSlot[L], (uint32_t)kv.first, g_listLock[L]});
@@ -1643,6 +1873,334 @@ void listsPanel()
     }
 }
 
+// ---- 연습: training slots (2026-11-13, owner: "스페셜과 비장의 아이 모두 F2에서 내가 훈련도 지정", "완료해서 성공했다고
+// 슬롯에서 바로 빼지말고 계속 담아 놓을 수 있도록 고정하는 기능을 F2에서", "3개가 아닌 몇개까지 ... 최대한의 슬롯") -------------
+// training.txt "sp|hizo\tslot\tplayer\tkind\tcourse\tlock", applied by saka_hooks.c cheats_training_apply. The slots stay
+// 3 of each: the save keeps 3, with other data right after them (REA: the loops are < 3 and the arrays touch).
+struct TrainEdit { std::string kind; int slot; uint32_t id; int sub; int course; bool lock; };
+std::vector<TrainEdit> loadTrainEdits()
+{
+    std::vector<TrainEdit> out;
+    for (const std::string& l : readLines(profileFile("training.txt").c_str())) {
+        std::vector<std::string> f = split(l, '\t');
+        if (f.size() >= 5)
+            out.push_back({f[0], std::atoi(f[1].c_str()), (uint32_t)std::strtoul(f[2].c_str(), nullptr, 10), std::atoi(f[3].c_str()),
+                           std::atoi(f[4].c_str()), f.size() < 6 || f[5] != "0"});
+    }
+    return out;
+}
+void saveTrainEdits(const std::vector<TrainEdit>& edits)
+{
+    std::vector<std::string> lines;
+    for (const TrainEdit& e : edits)
+        lines.push_back(e.kind + "\t" + std::to_string(e.slot) + "\t" + std::to_string(e.id) + "\t" + std::to_string(e.sub) + "\t" +
+                        std::to_string(e.course) + "\t" + (e.lock ? "1" : "0"));
+    writeLines(profileFile("training.txt").c_str(), lines);
+}
+
+void trainingPanel()
+{
+    loadTexts();
+    const uint32_t roster = 0x00EE2954u, record = 0x218u;
+    if (!committed(roster, 23 * record) || !committed(0x00EE83A8u, 0x84u)) {
+        ImGui::TextDisabled("게임 데이터가 아직 없습니다 (세이브를 불러온 뒤).");
+        return;
+    }
+    std::vector<TrainEdit> edits = loadTrainEdits();
+    note("칸마다 선수와 코스를 골라 적용. 고정이면 코스가 끝나 게임이 칸을 비우거나 다른 코스로 바꿔도 같은 선수·코스로 다시 "
+         "채움 (코스 비용은 들지 않음). 칸은 특별연습·비장의 아이 각 3칸이 게임 데이터의 최대 (바로 뒤에 다른 세이브 데이터가 있어 "
+         "늘릴 수 없음). 한 선수를 여러 칸에: 치트 탭 '같은 선수 여러 칸'. 1주 완료: 'SP 1턴 완료, 경험치 그대로'·'비장의 아이 1턴 "
+         "완료'. 성공: '비장의 아이 반드시 성공' (특별연습은 실패 판정이 없음).");
+    std::vector<std::pair<uint32_t, std::string>> players;   // the club's players
+    for (int s = 0; s < 23; s++) {
+        const uint32_t id = rd32(roster + record * (uint32_t)s);
+        if (validPlayer(id))
+            players.push_back({id, nameOf(g_text.players, (int)id)});
+    }
+    static int pickPlayer[6] = {-1, -1, -1, -1, -1, -1}, pickCourse[6], pickSub[6];
+    static bool pickLock[6] = {true, true, true, true, true, true}, init[6];
+    for (int row = 0; row < 6; row++) {
+        const bool sp = row < 3;
+        const int slot = row % 3;
+        const char* kind = sp ? "sp" : "hizo";
+        if (row == 0)
+            ImGui::SeparatorText("특별연습 (3칸)");
+        if (row == 3)
+            ImGui::SeparatorText("비장의 아이 (3칸)");
+        ImGui::PushID(row);
+        const uint32_t ea = sp ? 0x00EE83A8u + 0xCu * slot : 0x00EE83CCu + 0x20u * slot;
+        const uint32_t curId = rd32(ea);
+        const int curSub = sp ? 0 : (int)rd32(ea + 4);
+        const int curCourse = (int)rd32(ea + (sp ? 4 : 8));
+        const int weeks = rd8(ea + (sp ? 8 : 0xC));
+        const Names& curNames = sp ? g_text.spCourses : curSub ? g_text.awakCourses : g_text.persCourses;
+        std::string now = std::to_string(slot + 1) + "번  지금: " +
+                          (curId ? nameOf(g_text.players, (int)curId) + "  · " + (sp ? "" : curSub ? "능력각성 " : "개성강화 ") +
+                                       nameOf(curNames, curCourse) + "  · 남은 " + std::to_string(weeks) + "주"
+                                 : std::string("(비어 있음)"));
+        const TrainEdit* mine = nullptr;
+        for (const TrainEdit& e : edits)
+            if (e.kind == kind && e.slot == slot)
+                mine = &e;
+        if (mine)
+            now += std::string("  [") + (mine->lock ? "고정" : "한 번") + ": " + nameOf(g_text.players, (int)mine->id) + "]";
+        ImGui::TextUnformatted(now.c_str());
+        if (!init[row]) {   // the first picks: the designation, else the slot's current plan
+            init[row] = true;
+            const uint32_t want = mine ? mine->id : curId;
+            for (size_t k = 0; k < players.size(); k++)
+                if (players[k].first == want)
+                    pickPlayer[row] = (int)k;
+            pickCourse[row] = mine ? mine->course : curCourse;
+            pickSub[row] = mine ? mine->sub : curSub;
+            if (mine)
+                pickLock[row] = mine->lock;
+        }
+        ImGui::SetNextItemWidth(Px(220));
+        const bool havePick = pickPlayer[row] >= 0 && pickPlayer[row] < (int)players.size();
+        if (ImGui::BeginCombo("##player", havePick ? players[pickPlayer[row]].second.c_str() : "선수 고르기")) {
+            for (size_t k = 0; k < players.size(); k++)
+                if (ImGui::Selectable((players[k].second + "##p" + std::to_string(k)).c_str(), pickPlayer[row] == (int)k))
+                    pickPlayer[row] = (int)k;
+            ImGui::EndCombo();
+        }
+        if (!sp) {
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(Px(110));
+            const char* subs[2] = {"개성강화", "능력각성"};
+            if (ImGui::Combo("##sub", &pickSub[row], subs, 2))
+                pickCourse[row] = 0;
+        }
+        ImGui::SameLine();
+        const Names& names = sp ? g_text.spCourses : pickSub[row] ? g_text.awakCourses : g_text.persCourses;
+        ImGui::SetNextItemWidth(Px(250));
+        const std::string cname = pickCourse[row] > 0 ? nameOf(names, pickCourse[row]) + " (" + std::to_string(pickCourse[row]) + ")" : "코스 고르기";
+        if (ImGui::BeginCombo("##course", cname.c_str())) {
+            for (const auto& kv : names) {
+                if (kv.first <= 0 || kv.second.empty() || kv.second == "なし" || kv.second.find("総数") != std::string::npos)
+                    continue;
+                if (ImGui::Selectable((kv.second + " (" + std::to_string(kv.first) + ")").c_str(), pickCourse[row] == kv.first))
+                    pickCourse[row] = kv.first;
+            }
+            ImGui::EndCombo();
+        }
+        ImGui::SameLine();
+        ImGui::Checkbox("고정", &pickLock[row]);
+        ImGui::SameLine();
+        const std::string what = std::string(sp ? "특별연습 " : "비장의 아이 ") + std::to_string(slot + 1) + "번";
+        if (ImGui::Button("적용")) {
+            if (!havePick || pickCourse[row] <= 0)
+                toast(what + ": 선수와 코스를 고르세요", 1);
+            else {
+                edits.erase(std::remove_if(edits.begin(), edits.end(), [&](const TrainEdit& e) { return e.kind == kind && e.slot == slot; }), edits.end());
+                edits.push_back({kind, slot, players[pickPlayer[row]].first, sp ? 0 : pickSub[row], pickCourse[row], pickLock[row]});
+                saveTrainEdits(edits);
+                toast(what + ": " + players[pickPlayer[row]].second + " · " + nameOf(names, pickCourse[row]) + (pickLock[row] ? " (고정)" : " (한 번)"));
+            }
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("해제")) {
+            edits.erase(std::remove_if(edits.begin(), edits.end(), [&](const TrainEdit& e) { return e.kind == kind && e.slot == slot; }), edits.end());
+            saveTrainEdits(edits);
+            toast(what + ": 해제 (지금 칸의 코스는 끝까지 그대로)");
+        }
+        ImGui::PopID();
+    }
+}
+
+// ---- 스태프: the hired coach and scout (2026-11-13, owner: "코치와 스카우트들의 능력치도 내가 마음대로 편집하고 특능까지도
+// 마음대로 편집 가능하게 해주고. 계약기간 나이등도 마찬가지") ------------------------------------------------------------------
+// staff.txt "coach|scout\tfield\tvalue\tlock", applied by saka_hooks.c cheats_staff_apply (the fields are listed there).
+struct StaffEdit { std::string who, field; long long value; bool lock; };
+std::vector<StaffEdit> loadStaffEdits()
+{
+    std::vector<StaffEdit> out;
+    for (const std::string& l : readLines(profileFile("staff.txt").c_str())) {
+        std::vector<std::string> f = split(l, '\t');
+        if (f.size() >= 3)
+            out.push_back({f[0], f[1], std::atoll(f[2].c_str()), f.size() < 4 || f[3] != "0"});
+    }
+    return out;
+}
+void saveStaffEdits(const std::vector<StaffEdit>& edits)
+{
+    std::vector<std::string> lines;
+    for (const StaffEdit& e : edits)
+        lines.push_back(e.who + "\t" + e.field + "\t" + std::to_string(e.value) + "\t" + (e.lock ? "1" : "0"));
+    writeLines(profileFile("staff.txt").c_str(), lines);
+}
+
+void staffPanel()
+{
+    loadTexts();
+    std::vector<StaffEdit> edits = loadStaffEdits();
+    note("고용한 코치·스카우트를 바꿉니다. 나이·계약·연봉은 고용 기록, 등급·정책·시스템·특능은 그 사람의 마스터 기록에 씀 (게임이 효과를 "
+         "늘 거기서 읽음; 같은 사람을 쓰는 다른 구단이 있으면 그쪽도 같이 바뀜). 고정이면 1초에 10번 다시 씀, 아니면 한 번 (고용한 "
+         "사람이 바뀌면 다시 한 번).");
+    static std::map<std::string, int> input;
+    static std::map<std::string, bool> lockOf;
+    auto setEdit = [&](const std::string& who, const std::string& field, long long v, bool lock) {
+        edits.erase(std::remove_if(edits.begin(), edits.end(), [&](const StaffEdit& e) { return e.who == who && e.field == field; }), edits.end());
+        edits.push_back({who, field, v, lock});
+    };
+    auto dropEdit = [&](const std::string& who, const std::string& field) {
+        edits.erase(std::remove_if(edits.begin(), edits.end(), [&](const StaffEdit& e) { return e.who == who && e.field == field; }), edits.end());
+    };
+    auto findEdit = [&](const std::string& who, const std::string& field) -> const StaffEdit* {
+        for (const StaffEdit& e : edits)
+            if (e.who == who && e.field == field)
+                return &e;
+        return nullptr;
+    };
+    for (int w = 0; w < 2; w++) {
+        const bool coach = w == 0;
+        const std::string who = coach ? "coach" : "scout";
+        const uint32_t hired = coach ? 0x00EE2940u : 0x00EE6CF8u;
+        ImGui::SeparatorText(coach ? "코치" : "스카우트");
+        if (!committed(hired, 0x14)) {
+            ImGui::TextDisabled("게임 데이터가 아직 없습니다 (세이브를 불러온 뒤).");
+            continue;
+        }
+        const uint32_t id = rd32(hired);
+        if (id == 0 || (id & 0x80000000u) || id >= (coach ? 0x33Au : 0x1ACu)) {
+            ImGui::TextDisabled(id ? "직접 만든 코치는 아직 편집하지 않습니다." : "고용한 사람이 없습니다.");
+            continue;
+        }
+        const uint32_t master = coach ? 0x00BBA60Cu + id * 100u : 0x00E1F6ACu + id * 60u;
+        const Names& names = coach ? g_text.staff : g_text.scouts;
+        ImGui::Text("%s  (ID %u)  · %s", nameOf(names, (int)id).c_str(), id,
+                    nameOf(g_text.nations, coach ? staffNation((int)id) : scoutNation((int)id)).c_str());
+        ImGui::PushID(w);
+        auto row = [&](const char* field, const char* label, long long cur, int lo, int hi, const std::string& shown) {
+            ImGui::PushID(field);
+            const std::string k = who + "." + field;
+            if (!input.count(k))
+                input[k] = (int)cur;
+            if (!lockOf.count(k))
+                lockOf[k] = true;
+            ImGui::AlignTextToFramePadding();
+            ImGui::Text("%s: %s", label, shown.c_str());
+            ImGui::SameLine(Px(300));
+            ImGui::SetNextItemWidth(Px(130));
+            if (ImGui::InputInt("##v", &input[k]))
+                input[k] = std::max(lo, std::min(hi, input[k]));
+            ImGui::SameLine();
+            ImGui::Checkbox("고정", &lockOf[k]);
+            ImGui::SameLine();
+            if (ImGui::Button("적용")) {
+                setEdit(who, field, input[k], lockOf[k]);
+                saveStaffEdits(edits);
+                toast(std::string(coach ? "코치 " : "스카우트 ") + label + " = " + std::to_string(input[k]) + (lockOf[k] ? " (고정)" : " (한 번)"));
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("해제")) {
+                dropEdit(who, field);
+                saveStaffEdits(edits);
+                toast(std::string(coach ? "코치 " : "스카우트 ") + label + ": 해제");
+            }
+            if (const StaffEdit* e = findEdit(who, field)) {
+                ImGui::SameLine();
+                ImGui::TextDisabled("[%s %lld]", e->lock ? "고정" : "한 번", e->value);
+            }
+            ImGui::PopID();
+        };
+        const int age = rd8(hired + 4), years = rd8(hired + 5), rank = rd8(master + (coach ? 9 : 8));
+        const uint32_t salary = rd32(hired + 8);
+        row("age", "나이", age, 15, 99, std::to_string(age) + "세");
+        row("years", "계약 남은 해", years, 1, 9, std::to_string(years) + "년" + ((rd32(hired + 0xC) & 1u) ? " (재계약 안 함 표시)" : ""));
+        row("salary", "연봉 (만엔)", salary, 0, 100000, std::to_string(salary) + "만");
+        row("rank", "등급", rank, 0, 15, coach ? gradeText(0, rank) : std::to_string(rank));
+        if (rd32(hired + 0xC) & 1u) {
+            if (ImGui::Button("떠나지 않게 (재계약 가능으로)")) {
+                setEdit(who, "keep", 1, true);
+                saveStaffEdits(edits);
+                toast(std::string(coach ? "코치" : "스카우트") + ": 재계약 안 함 표시를 지움 (고정)");
+            }
+        }
+        if (coach) {
+            const int policy = rd8(master + 0xA), circle = rd8(master + 0xB);
+            row("policy", "정책 위치 (0~24)", policy, 0, 24, std::to_string(policy));
+            row("circle", "정책 원 크기 (0~3)", circle, 0, 3, std::to_string(circle));
+            // systems 3-4-3 .. 5-4-1 (+0x18..+0x1F)
+            static const char* const kSys[8] = {"3-4-3", "3-5-2", "3-6-1", "4-3-3", "4-4-2", "4-5-1", "5-3-2", "5-4-1"};
+            static bool sys[8], sysInit;
+            static bool sysLock = true;
+            if (!sysInit) {
+                sysInit = true;
+                for (int s = 0; s < 8; s++)
+                    sys[s] = rd8(master + 0x18 + s) != 0;
+            }
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted("잘하는 시스템:");
+            for (int s = 0; s < 8; s++) {
+                ImGui::SameLine();
+                ImGui::Checkbox(kSys[s], &sys[s]);
+            }
+            ImGui::SameLine();
+            ImGui::Checkbox("고정##sys", &sysLock);
+            ImGui::SameLine();
+            if (ImGui::Button("적용##sys")) {
+                for (int s = 0; s < 8; s++)
+                    setEdit(who, "sys" + std::to_string(s), sys[s] ? 1 : 0, sysLock);
+                saveStaffEdits(edits);
+                toast("코치 시스템 적용");
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("해제##sys")) {
+                for (int s = 0; s < 8; s++)
+                    dropEdit(who, "sys" + std::to_string(s));
+                saveStaffEdits(edits);
+                toast("코치 시스템: 해제");
+            }
+        }
+        // abilities (8 x u32: coach +0x2C, scout +0x1C; names data\text2\staff_sp_name.txb)
+        const uint32_t abBase = master + (coach ? 0x2Cu : 0x1Cu);
+        static int ab[2][8];
+        static bool abInit[2], abLock[2] = {true, true};
+        if (!abInit[w]) {
+            abInit[w] = true;
+            for (int s = 0; s < 8; s++)
+                ab[w][s] = (int)rd32(abBase + 4u * s);
+        }
+        ImGui::TextUnformatted("특능 (8칸):");
+        for (int s = 0; s < 8; s++) {
+            ImGui::PushID(100 + s);
+            const int cur = (int)rd32(abBase + 4u * s);
+            if (s % 2)
+                ImGui::SameLine(Px(470));
+            ImGui::SetNextItemWidth(Px(330));
+            const std::string label = ab[w][s] ? nameOf(g_text.staffAbilities, ab[w][s]) : std::string("(없음)");
+            if (ImGui::BeginCombo("##ab", (label + (cur != ab[w][s] ? "  *" : "")).c_str())) {
+                if (ImGui::Selectable("(없음)", ab[w][s] == 0))
+                    ab[w][s] = 0;
+                for (const auto& kv : g_text.staffAbilities)
+                    if (kv.first > 0 && kv.first < 0x100 && !kv.second.empty() && kv.second.find("総数") == std::string::npos &&
+                        ImGui::Selectable((kv.second + " (" + std::to_string(kv.first) + ")").c_str(), ab[w][s] == kv.first))
+                        ab[w][s] = kv.first;
+                ImGui::EndCombo();
+            }
+            ImGui::PopID();
+        }
+        ImGui::Checkbox("고정##ab", &abLock[w]);
+        ImGui::SameLine();
+        if (ImGui::Button("특능 적용")) {
+            for (int s = 0; s < 8; s++)
+                setEdit(who, "ab" + std::to_string(s), ab[w][s], abLock[w]);
+            saveStaffEdits(edits);
+            toast(std::string(coach ? "코치" : "스카우트") + " 특능 적용");
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("특능 해제")) {
+            for (int s = 0; s < 8; s++)
+                dropEdit(who, "ab" + std::to_string(s));
+            saveStaffEdits(edits);
+            abInit[w] = false;
+            toast(std::string(coach ? "코치" : "스카우트") + " 특능: 해제 (원래 값은 게임을 다시 켜면 돌아옴)");
+        }
+        ImGui::PopID();
+    }
+}
+
 void speedBadgeWindow(unsigned w)
 {
     const int sp = g_saka_user_speed;
@@ -1652,8 +2210,11 @@ void speedBadgeWindow(unsigned w)
                  ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav);
     if (sp > 1)
         ImGui::Text(">> 게임 속도 x%d   (F7 / F8: 끄기)", sp);
-    else
+    else if ((int)GetTickCount() - g_speedShownAt < 2000)
         ImGui::TextUnformatted("게임 속도 보통");
+    if ((int)GetTickCount() - g_superShownAt < 2500)
+        ImGui::TextUnformatted(g_superArmed ? "슈퍼플레이 대기 (F6): 20초 안에 우리 팀 스킬이 발동할 장면에서 반드시 발동"
+                                            : "슈퍼플레이 (F6): 치트 목록의 '슈퍼플레이 F6' 스위치를 켜야 작동");
     ImGui::End();
 }
 
@@ -1793,6 +2354,16 @@ void drawMenu(unsigned w, unsigned h)
             if (ImGui::BeginTabItem("목록", nullptr, tabFlags(2))) {
                 shownTab = 2;
                 listsPanel();
+                ImGui::EndTabItem();
+            }
+            if (ImGui::BeginTabItem("연습", nullptr, tabFlags(3))) {
+                shownTab = 3;
+                trainingPanel();
+                ImGui::EndTabItem();
+            }
+            if (ImGui::BeginTabItem("스태프", nullptr, tabFlags(4))) {
+                shownTab = 4;
+                staffPanel();
                 ImGui::EndTabItem();
             }
             ImGui::EndTabBar();
@@ -2018,7 +2589,10 @@ void feedInput(unsigned w, unsigned h)
     io.AddKeyEvent(ImGuiKey_GamepadR1, (p & 0x800u) != 0);
 }
 
-bool speedBadge() { return g_saka_user_speed > 1 || (int)GetTickCount() - g_speedShownAt < 2000; }
+bool speedBadge()
+{
+    return g_saka_user_speed > 1 || (int)GetTickCount() - g_speedShownAt < 2000 || (int)GetTickCount() - g_superShownAt < 2500;
+}
 int overlayOn() { return g_open || speedBadge() ? 1 : 0; }
 
 // SAKA_OVERLAY_SHOT=<file.bmp> (tests): after the menu has been drawn for a while, one back buffer (game + menu)

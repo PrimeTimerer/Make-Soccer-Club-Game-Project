@@ -1,0 +1,37 @@
+diff --git a/recompiled/ppu_recomp_015.cpp b/recompiled/ppu_recomp_015.cpp
+--- a/recompiled/ppu_recomp_015.cpp
++++ b/recompiled/ppu_recomp_015.cpp
+@@ -83121,6 +83121,7 @@
+ }
+ 
+ extern "C" void saka_hizo_roll_hook(ppu_context* ctx);
++extern "C" void saka_hizo_trait_roll_hook(ppu_context* ctx);   /* saka_hooks.c cheats (2026-11-13) */
+ void func_00567A2C(ppu_context* ctx) {
+     PPU_MM_SNAP
+         uint64_t _cs_29 = ctx->gpr[29];
+@@ -83164,7 +83165,7 @@
+         ctx->gpr[3] = (int64_t)(int32_t)(0);
+         ctx->gpr[4] = (int64_t)(int32_t)(0x63);
+         ctx->lr = 0x00567AB8; func_00593490(ctx); DRAIN_TRAMPOLINE(ctx);
+-        saka_hizo_roll_hook(ctx);
++        saka_hizo_trait_roll_hook(ctx);   /* cheat 4: the first outcome he does not have */
+         ctx->gpr[7] = (int64_t)(int32_t)(0);
+         ctx->gpr[5] = vm_read32(ctx->gpr[31] + 0x0);
+         ctx->gpr[6] = ctx->gpr[1] | 0x0;
+@@ -83222,6 +83223,7 @@
+         return;
+ }
+ 
++extern "C" void saka_hizo_skill_roll_hook(ppu_context* ctx);   /* saka_hooks.c cheats (2026-11-13) */
+ void func_00567B74(ppu_context* ctx) {
+     PPU_MM_SNAP
+         uint64_t _cs_29 = ctx->gpr[29];
+@@ -83265,7 +83267,7 @@
+         ctx->gpr[3] = (int64_t)(int32_t)(0);
+         ctx->gpr[4] = (int64_t)(int32_t)(0x63);
+         ctx->lr = 0x00567C00; func_00593490(ctx); DRAIN_TRAMPOLINE(ctx);
+-        saka_hizo_roll_hook(ctx);
++        saka_hizo_skill_roll_hook(ctx);   /* cheat 4: the first outcome he does not have */
+         ctx->gpr[7] = (int64_t)(int32_t)(0);
+         ctx->gpr[5] = vm_read8(ctx->gpr[30] + 0x10A);
+         ctx->gpr[6] = ctx->gpr[1] | 0x0;

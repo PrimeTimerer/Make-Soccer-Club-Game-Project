@@ -1,0 +1,59 @@
+diff --git a/recompiled/ppu_recomp_028.cpp b/recompiled/ppu_recomp_028.cpp
+--- a/recompiled/ppu_recomp_028.cpp
++++ b/recompiled/ppu_recomp_028.cpp
+@@ -2,6 +2,7 @@
+ #include "ppu_recomp.h"
+ extern "C" void saka_train_snapshot_hook(ppu_context* ctx);   /* saka_hooks.c cheats (2026-11-09) */
+ extern "C" void saka_train_mult_hook(ppu_context* ctx);   /* saka_hooks.c cheats (2026-11-09) */
++extern "C" void saka_youth_mult_hook(ppu_context* ctx);   /* saka_hooks.c cheats (2026-11-13) */
+ extern "C" void saka_sp_awake_mult_hook(ppu_context* ctx);   /* saka_hooks.c cheats (2026-11-09) */
+ extern "C" void saka_sp_week_mult_hook(ppu_context* ctx);   /* saka_hooks.c cheats (2026-11-09) */
+ extern "C" void saka_train_sp_keep_hook(ppu_context* ctx);   /* saka_hooks.c cheats (2026-11-09) */
+@@ -31903,6 +31904,7 @@
+ loc_005164EC:
+         ctx->gpr[3] = ctx->gpr[26] | 0x0;
+         ctx->gpr[4] = ctx->gpr[31] | 0x0;
++        saka_youth_mult_hook(ctx);   /* cheat: youth growth, r3 = record, r5 = gain */
+         ctx->lr = 0x005164F8; func_00577318(ctx); DRAIN_TRAMPOLINE(ctx);
+         goto loc_005165CC;
+ loc_005164FC:
+@@ -31936,6 +31938,7 @@
+ loc_00516568:
+         ctx->gpr[3] = ctx->gpr[26] | 0x0;
+         ctx->gpr[4] = ctx->gpr[31] | 0x0;
++        saka_youth_mult_hook(ctx);   /* cheat: youth growth, r3 = record, r5 = gain */
+         ctx->lr = 0x00516574; func_00577318(ctx); DRAIN_TRAMPOLINE(ctx);
+         goto loc_005165CC;
+ loc_00516578:
+@@ -31960,6 +31963,7 @@
+ loc_005165C0:
+         ctx->gpr[3] = ctx->gpr[26] | 0x0;
+         ctx->gpr[4] = ctx->gpr[31] | 0x0;
++        saka_youth_mult_hook(ctx);   /* cheat: youth growth, r3 = record, r5 = gain */
+         ctx->lr = 0x005165CC; func_00577318(ctx); DRAIN_TRAMPOLINE(ctx);
+ loc_005165CC:
+         { uint64_t _a = ctx->gpr[31]; uint64_t _r = _a + (uint64_t)(int64_t)(1); ctx->gpr[31] = _r; ctx->xer = (ctx->xer & ~(1u << 29)) | ((_r < _a) ? (1u << 29) : 0u); }
+@@ -32123,6 +32127,7 @@
+         ctx->gpr[5] = (int64_t)(int32_t)ctx->gpr[30];
+         ctx->gpr[3] = ctx->gpr[26] | 0x0;
+         ctx->gpr[4] = ctx->gpr[31] | 0x0;
++        saka_youth_mult_hook(ctx);   /* cheat: youth growth, r3 = record, r5 = gain */
+         ctx->lr = 0x00516820; func_00577318(ctx); DRAIN_TRAMPOLINE(ctx);
+         goto loc_005168FC;
+ loc_00516824:
+@@ -32157,6 +32162,7 @@
+         ctx->gpr[5] = (int64_t)(int32_t)ctx->gpr[30];
+         ctx->gpr[3] = ctx->gpr[26] | 0x0;
+         ctx->gpr[4] = ctx->gpr[31] | 0x0;
++        saka_youth_mult_hook(ctx);   /* cheat: youth growth, r3 = record, r5 = gain */
+         ctx->lr = 0x005168A0; func_00577318(ctx); DRAIN_TRAMPOLINE(ctx);
+         goto loc_005168FC;
+ loc_005168A4:
+@@ -32182,6 +32188,7 @@
+         ctx->gpr[5] = (int64_t)(int32_t)ctx->gpr[30];
+         ctx->gpr[3] = ctx->gpr[26] | 0x0;
+         ctx->gpr[4] = ctx->gpr[31] | 0x0;
++        saka_youth_mult_hook(ctx);   /* cheat: youth growth, r3 = record, r5 = gain */
+         ctx->lr = 0x005168FC; func_00577318(ctx); DRAIN_TRAMPOLINE(ctx);
+ loc_005168FC:
+         { uint64_t _a = ctx->gpr[31]; uint64_t _r = _a + (uint64_t)(int64_t)(1); ctx->gpr[31] = _r; ctx->xer = (ctx->xer & ~(1u << 29)) | ((_r < _a) ? (1u << 29) : 0u); }

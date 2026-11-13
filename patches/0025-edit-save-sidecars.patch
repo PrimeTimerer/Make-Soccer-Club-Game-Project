@@ -1,0 +1,20 @@
+--- a/libs/system/cellSaveData.c
++++ b/libs/system/cellSaveData.c
+@@ -850,6 +850,8 @@
+ /* A game port's view of the save files (e.g. per-save settings): called after each file operation of a save
+  * directory with the directory, the file name, the operation (CELL_SAVEDATA_FILEOP_*) and its result. */
+ void (*g_savedata_file_hook)(const char* dir, const char* file, unsigned op, int result) = NULL;
++/* Optional port-owned save extensions; receives the resolved host directory. */
++void (*g_savedata_host_file_hook)(const char* dir, const char* file, unsigned op, int result) = NULL;
+ 
+ static s32 savedata_execute_run(const char* dirName, int is_save,
+                                 CellSaveDataSetBuf* setBuf,
+@@ -991,6 +993,8 @@
+                    fileSet.fileSize, fileSet.fileBufSize, exc);
+             if (g_savedata_file_hook)
+                 g_savedata_file_hook(dirName, fileSet.fileName ? fileSet.fileName : "", fileSet.fileOperation, exc);
++            if (g_savedata_host_file_hook)
++                g_savedata_host_file_hook(save_path, fileSet.fileName ? fileSet.fileName : "", fileSet.fileOperation, exc);
+             if (exc < 0) { free(fileList); return exc; }
+             exc_size = (u32)exc;
+         }

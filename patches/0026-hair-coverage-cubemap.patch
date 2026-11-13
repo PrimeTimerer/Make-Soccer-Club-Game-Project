@@ -1,0 +1,129 @@
+--- a/libs/video/rsx_live_draw.c
++++ b/libs/video/rsx_live_draw.c
+@@ -92,6 +92,7 @@
+ 
+ #include <ctype.h>
+ #include <stdio.h>
++#include <math.h>
+ #include <stdlib.h>
+ 
+ #if defined(YZ_PERF_CLEAN) || defined(_MSC_VER)
+@@ -1452,6 +1453,8 @@
+ 
+ typedef struct {
+     u32 alpha_test_enable, alpha_func, alpha_ref_raw, alpha_ref_format;
++    u32 alpha_coverage_samples;
++    u32 polygon_offset_factor, polygon_offset_units;
+     u32 blend_enable, sf_rgb, df_rgb, sf_a, df_a, eq_rgb, eq_a;
+     u32 depth_test, depth_write, depth_func;
+     u32 cull_enable, cull_face, front_face;
+@@ -1481,6 +1484,20 @@
+     rsx_dsp_surface alpha_surface;
+     rsx_dsp_get_surface(&g.rsx, &alpha_surface);
+     rs->alpha_ref_format = alpha_surface.color_format;
++    /* The live renderer stores MSAA as an expanded sample grid. D3D12's
++     * AlphaToCoverageEnable has no effect on these single-sample resources;
++     * emulate coverage in the fragment shader at the guest sample positions. */
++    if (rsx_dsp_reg(&g.rsx, 0x1D7C) & 0x10u)
++        rs->alpha_coverage_samples = alpha_surface.aa_sx * alpha_surface.aa_sy;
++    if (rsx_dsp_reg(&g.rsx, 0x0A68) & 1u) {
++        rs->polygon_offset_factor = rsx_dsp_reg(&g.rsx, 0x0A78);
++        rs->polygon_offset_units = rsx_dsp_reg(&g.rsx, 0x0A7C);
++    }
++    { static int no_coverage = -1, no_offset = -1;
++      if (no_coverage < 0) no_coverage = getenv("LD_NO_ALPHA_COVERAGE") != NULL;
++      if (no_offset < 0) no_offset = getenv("LD_NO_POLYGON_OFFSET") != NULL;
++      if (no_coverage) rs->alpha_coverage_samples = 0;
++      if (no_offset) rs->polygon_offset_factor = rs->polygon_offset_units = 0; }
+     rs->rt_fp16 = alpha_surface.color_format == RSX_SURFACE_FMT_F_W16Z16Y16X16;
+     rs->rt_count = ld_rt_count(alpha_surface.color_target);
+     rs->blend_enable = rsx_dsp_reg(&g.rsx, M_BLEND_ENABLE) & 1;
+@@ -1557,6 +1574,12 @@
+         b->BlendOpAlpha  = gcm_blend_op(rs->eq_a);
+     }
+     pd->RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
++    float offset_slope, offset_units;
++    memcpy(&offset_slope, &rs->polygon_offset_factor, sizeof offset_slope);
++    memcpy(&offset_units, &rs->polygon_offset_units, sizeof offset_units);
++    pd->RasterizerState.SlopeScaledDepthBias = isfinite(offset_slope) ? offset_slope : 0.0f;
++    pd->RasterizerState.DepthBias = isfinite(offset_units)
++        ? (INT)fmaxf(-16777216.0f, fminf(16777216.0f, offset_units)) : 0;
+     if (rs->cull_enable && rs->cull_face) {
+         const u32 f = rs->cull_face;
+         pd->RasterizerState.CullMode = (f == 0x0404) ? D3D12_CULL_MODE_FRONT
+@@ -2261,6 +2284,11 @@
+         mw = mw > 1 ? mw >> 1 : 1;
+         mh = mh > 1 ? mh >> 1 : 1;
+     }
++    /* RSX swizzled cube faces each begin on a 128-byte boundary. The
++     * 32x32 DXT5 environment maps use 0x580 bytes per face, not 0x550.
++     * Reading the padding as blocks produced zero-alpha reflection samples
++     * and NaNs in the game's RGB/alpha decode (black spots on the skin). */
++    if (t->cubemap && !linear) span = (span + 127u) & ~127u;
+     return t->cubemap ? span * 6 : span;
+ }
+ 
+@@ -4726,6 +4754,9 @@
+      * field is listed explicitly so struct padding can never become identity. */
+     LD_HASH_RENDER_FIELD(alpha_test_enable);
+     LD_HASH_RENDER_FIELD(alpha_func);
++    LD_HASH_RENDER_FIELD(alpha_coverage_samples);
++    LD_HASH_RENDER_FIELD(polygon_offset_factor);
++    LD_HASH_RENDER_FIELD(polygon_offset_units);
+     LD_HASH_RENDER_FIELD(blend_enable);
+     LD_HASH_RENDER_FIELD(sf_rgb);
+     LD_HASH_RENDER_FIELD(df_rgb);
+@@ -5464,6 +5495,35 @@
+ #define LD_PSO_BAIL(reason) \
+     do { static int _said_ = 0; ld_pso_bail(&_said_, (reason)); } while (0)
+ 
++/* Coverage is evaluated after the ordinary alpha test, before any colour or
++ * depth write. Four physical texels represent one guest 4x-MSAA pixel. */
++static int ld_apply_alpha_coverage(char* hlsl, size_t capacity, u32 samples)
++{
++    if (!samples) return 0;
++    char* marker = NULL;
++    for (char* p = strstr(hlsl, "    return "); p; p = strstr(p + 1, "    return ")) marker = p;
++    if (!marker) return -1;
++    char* expression = marker + strlen("    return ");
++    char* end = strstr(expression, ";\n}\n");
++    if (!end || end == expression || end - expression >= 96) return -1;
++    char value[96];
++    memcpy(value, expression, (size_t)(end - expression)); value[end - expression] = 0;
++    const int mrt = strstr(hlsl, "struct PSOutput") != NULL;
++    const char* threshold = samples >= 4
++        ? "(float(((uint(input.position.x) & 1u) << 1u) ^ (uint(input.position.y) & 1u)) + 0.5) * 0.25"
++        : samples == 2 ? "(float(uint(input.position.x) & 1u) + 0.5) * 0.5" : "0.5";
++    char suffix[768];
++    int n = snprintf(suffix, sizeof suffix,
++        "    %s _rsx_coverage = %s;\n"
++        "    if (!(%s.a >= %s)) discard;\n"
++        "    return _rsx_coverage;\n}\n",
++        mrt ? "PSOutput" : "float4", value,
++        mrt ? "_rsx_coverage.t0" : "_rsx_coverage", threshold);
++    if (n < 0 || (size_t)n >= sizeof suffix || (size_t)(marker - hlsl) + n + 1 > capacity) return -1;
++    memcpy(marker, suffix, (size_t)n + 1);
++    return 1;
++}
++
+ static ID3D12PipelineState* get_pso(
+     const rsx_vertex_layout_plan* masked_layout, int packed_payload)
+ {
+@@ -5758,6 +5818,8 @@
+     g_ld_profile.total.decompile_qpc +=
+         (u64)(ld_profile_qpc() - decompile_begin);
+ #endif
++    if (fi > 0 && ld_apply_alpha_coverage(ps_hlsl, sizeof ps_hlsl, rs.alpha_coverage_samples) < 0)
++        fi = -1;
+     /* LD_FORCE_GREEN=1: make every fragment program return solid green.
+      *
+      * The same trick as LD_CLEAR_TEST, applied one stage later. Clears are
+@@ -8010,6 +8072,8 @@
+         fprintf(file, "bf=%X/%X/%X/%X eq=%X/%X ", rs.sf_rgb, rs.df_rgb, rs.sf_a, rs.df_a,
+                 rs.eq_rgb, rs.eq_a);
+     fprintf(file, "at=%u/0x%X/0x%X ", rs.alpha_test_enable, rs.alpha_func, rs.alpha_ref_raw);
++    fprintf(file, "aa=%08X po=%u/%08X/%08X ", rsx_dsp_reg(&g.rsx, 0x1D7C),
++            rsx_dsp_reg(&g.rsx, 0x0A68), rsx_dsp_reg(&g.rsx, 0x0A78), rsx_dsp_reg(&g.rsx, 0x0A7C));
+     fprintf(file, "sc=%08X/%08X ", rsx_dsp_reg(&g.rsx, M_SCISSOR_HORIZONTAL), rsx_dsp_reg(&g.rsx, M_SCISSOR_VERTICAL));
+     if (rs.stencil_enable)
+         fprintf(file, "st=%X/%X/%X/%X/%X/%X ref=%X ", rs.s_func, rs.s_func_mask, rs.s_write_mask, rs.s_fail, rs.s_zfail, rs.s_zpass, rsx_dsp_reg(&g.rsx, M_STENCIL_FUNC + 4));

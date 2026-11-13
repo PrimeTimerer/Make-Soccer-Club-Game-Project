@@ -1,0 +1,124 @@
+--- a/recompiled/ppu_recomp_009.cpp
++++ b/recompiled/ppu_recomp_009.cpp
+@@ -53951,6 +53951,7 @@
+         return;
+ }
+ 
++extern "C" int saka_edit_own_id(uint32_t);
+ void func_00349B0C(ppu_context* ctx) {
+     PPU_MM_SNAP
+         uint64_t _cs_29 = ctx->gpr[29];
+@@ -54019,7 +54020,7 @@
+         { int64_t a = (int32_t)ctx->gpr[5]; int64_t b = (int64_t)0x40; uint32_t cr_val = ((a < b) ? 8 : (a > b) ? 4 : 2) | ((ctx->xer >> 31) & 1u); ctx->cr = (ctx->cr & ~(0xFu << 28)) | (cr_val << 28); }
+         if ((!((ctx->cr >> 29) & 1))) goto loc_00349C18;
+         ctx->gpr[3] = vm_read32(ctx->gpr[29] + 0x0);
+-        { int64_t a = (int32_t)ctx->gpr[3]; int64_t b = (int64_t)0x7FFF; uint32_t cr_val = ((a < b) ? 8 : (a > b) ? 4 : 2) | ((ctx->xer >> 31) & 1u); ctx->cr = (ctx->cr & ~(0xFu << 28)) | (cr_val << 28); }
++        { int64_t a = saka_edit_own_id((uint32_t)ctx->gpr[3]) ? 0x7FFF : (int32_t)ctx->gpr[3]; int64_t b = (int64_t)0x7FFF; uint32_t cr_val = ((a < b) ? 8 : (a > b) ? 4 : 2) | ((ctx->xer >> 31) & 1u); ctx->cr = (ctx->cr & ~(0xFu << 28)) | (cr_val << 28); }
+         if ((!((ctx->cr >> 29) & 1))) goto loc_00349C34;
+         ctx->gpr[4] = (int64_t)(int32_t)((uint32_t)0xF7 << 16);
+         ctx->gpr[3] = ctx->gpr[31] | 0x0;
+--- a/recompiled/ppu_recomp_011.cpp
++++ b/recompiled/ppu_recomp_011.cpp
+@@ -95129,6 +95129,7 @@
+         return;
+ }
+ 
++extern "C" int saka_edit_own_id(uint32_t);
+ void func_0041E418(ppu_context* ctx) {
+     PPU_MM_SNAP
+         uint64_t _cs_14 = ctx->gpr[14];
+@@ -95538,7 +95539,7 @@
+         if (((ctx->cr >> 31) & 1)) goto loc_0041E82C;
+         ctx->gpr[5] = (int64_t)(int32_t)((uint32_t)0xF7 << 16);
+         ctx->gpr[3] = vm_read32(ctx->gpr[5] + -0x2A94);
+-        { int64_t a = (int32_t)ctx->gpr[3]; int64_t b = (int64_t)0x7FFF; uint32_t cr_val = ((a < b) ? 8 : (a > b) ? 4 : 2) | ((ctx->xer >> 31) & 1u); ctx->cr = (ctx->cr & ~(0xFu << 28)) | (cr_val << 28); }
++        { int64_t a = saka_edit_own_id((uint32_t)ctx->gpr[3]) ? 0x7FFF : (int32_t)ctx->gpr[3]; int64_t b = (int64_t)0x7FFF; uint32_t cr_val = ((a < b) ? 8 : (a > b) ? 4 : 2) | ((ctx->xer >> 31) & 1u); ctx->cr = (ctx->cr & ~(0xFu << 28)) | (cr_val << 28); }
+         if ((!((ctx->cr >> 29) & 1))) goto loc_0041EB78;
+         ctx->gpr[3] = (int64_t)(int32_t)((uint32_t)0xF7 << 16);
+         ctx->ctr = ctx->gpr[23];
+--- a/recompiled/ppu_recomp_013.cpp
++++ b/recompiled/ppu_recomp_013.cpp
+@@ -90651,7 +90651,9 @@
+         return;
+ }
+ 
++extern "C" void saka_edit_clear_records(void);
+ void func_004C8764(ppu_context* ctx) {
++    saka_edit_clear_records(); return;
+     PPU_MM_SNAP
+         uint64_t _cs_30 = ctx->gpr[30];
+         uint64_t _cs_31 = ctx->gpr[31];
+@@ -92382,7 +92384,9 @@
+         return;
+ }
+ 
++extern "C" int saka_edit_master_hook(ppu_context*);
+ void func_004C9EF4(ppu_context* ctx) {
++    if (saka_edit_master_hook(ctx)) return;
+     PPU_MM_SNAP
+         uint64_t _cs_31 = ctx->gpr[31];
+         vm_write64(ctx->gpr[1] + -0x80, ctx->gpr[1]); ctx->gpr[1] += -0x80;
+--- a/recompiled/ppu_recomp_014.cpp
++++ b/recompiled/ppu_recomp_014.cpp
+@@ -98520,7 +98520,10 @@
+         return;
+ }
+ 
+-void func_00522030(ppu_context* ctx) {
++extern "C" void saka_edit_release(ppu_context*, void (*)(ppu_context*));
++static void saka_native_release(ppu_context*);
++void func_00522030(ppu_context* ctx) { saka_edit_release(ctx, saka_native_release); }
++static void saka_native_release(ppu_context* ctx) {
+     PPU_MM_SNAP
+         uint64_t _cs_23 = ctx->gpr[23];
+         uint64_t _cs_24 = ctx->gpr[24];
+--- a/recompiled/ppu_recomp_015.cpp
++++ b/recompiled/ppu_recomp_015.cpp
+@@ -14360,7 +14360,9 @@
+         return;
+ }
+ 
++extern "C" int saka_edit_limit(void);
+ void func_0052F810(ppu_context* ctx) {
++    ctx->gpr[3] = saka_edit_limit(); return;
+     PPU_MM_SNAP
+         uint64_t _cs_29 = ctx->gpr[29];
+         uint64_t _cs_30 = ctx->gpr[30];
+@@ -14420,6 +14422,7 @@
+         return;
+ }
+ 
++extern "C" int saka_edit_own_id(uint32_t);
+ void func_0052F8D4(ppu_context* ctx) {
+     PPU_MM_SNAP
+         uint64_t _cs_24 = ctx->gpr[24];
+@@ -14564,6 +14567,7 @@
+         ctx->gpr[3] = vm_read32(ctx->gpr[3] + 0x0);
+         ctx->gpr[3] = (int64_t)(int32_t)ctx->gpr[3];
+         ctx->lr = 0x0052FACC; func_00495E54(ctx); DRAIN_TRAMPOLINE(ctx);
++        if (saka_edit_own_id(vm_read32(ctx->gpr[25]))) ctx->gpr[3] = 0; // limit checked at import; keep the native negotiation path
+         { int64_t a = (int32_t)ctx->gpr[3]; int64_t b = (int64_t)0; uint32_t cr_val = ((a < b) ? 8 : (a > b) ? 4 : 2) | ((ctx->xer >> 31) & 1u); ctx->cr = (ctx->cr & ~(0xFu << 28)) | (cr_val << 28); }
+         if ((!((ctx->cr >> 29) & 1))) goto loc_0052FAF4;
+         { uint64_t _a = ctx->gpr[30]; uint64_t _r = _a + (uint64_t)(int64_t)(1); ctx->gpr[30] = _r; ctx->xer = (ctx->xer & ~(1u << 29)) | ((_r < _a) ? (1u << 29) : 0u); }
+@@ -20021,7 +20025,9 @@
+         return;
+ }
+ 
++extern "C" void saka_edit_import(ppu_context*, void (*)(ppu_context*));
+ void func_0053440C(ppu_context* ctx) {
++    saka_edit_import(ctx, func_0052F8D4); return;
+     PPU_MM_SNAP
+         uint64_t _cs_27 = ctx->gpr[27];
+         uint64_t _cs_28 = ctx->gpr[28];
+--- a/recompiled/ppu_recomp_028.cpp
++++ b/recompiled/ppu_recomp_028.cpp
+@@ -11144,7 +11144,9 @@
+         return;
+ }
+ 
++
+ void func_00495E54(ppu_context* ctx) {
++    if (ctx->gpr[3] == 0x7FFBu || ctx->gpr[3] == 0x7FFCu) { ctx->gpr[3] = 1; return; }
+     PPU_MM_SNAP
+         ctx->gpr[4] = ctx->gpr[3] | 0x0;
+         ctx->gpr[3] = (int64_t)(int32_t)(0);

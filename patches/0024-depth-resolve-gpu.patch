@@ -1,0 +1,215 @@
+diff --git a/libs/video/rsx_live_draw.c b/libs/video/rsx_live_draw.c
+--- a/libs/video/rsx_live_draw.c
++++ b/libs/video/rsx_live_draw.c
+@@ -4386,6 +4386,134 @@
+     z->snapshot_state = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+     z->snapshot_valid = 1;
+     z->had_write = 0;
++    return 1;
++}
++
++/* NV3089 scaled blit out of a depth buffer the renderer keeps only on the GPU, into a colour buffer (2026-11-13,
++ * Saka Tsuku: cut-scenes and in-match events were blurred all over). The match resolves its 2560x1440 depth
++ * (0x012C0000) at half size into 0x00B40000 this way and reads that back as an A8R8G8B8 texture, the depth of its
++ * depth of field (the composite into 0x03D40000 mixes the sharp 0x00F00000 and the 320x180 blur by it). Guest memory
++ * there holds nothing the draws wrote, so the composite took every pixel as out of focus. Draw it on the GPU: the
++ * zeta's R32F snapshot over the source rect. The guest sees D24S8 read as A8R8G8B8 (A = depth bits 23-16, R = 15-8,
++ * G = 7-0, B = stencil) through the texture remap 0xAA93 (x = A, y = R, z = G, w = B); a live surface is sampled
++ * without the remap, so the surface holds the remapped order: R = depth 23-16, G = 15-8, B = 7-0, A = 0. The live
++ * surface at the destination then serves the texture lookups there. LD_DEPTH_RESOLVE=0 turns it off. */
++static ID3D12PipelineState* g_dresolve_pso;
++static ID3D12PipelineState* ld_depth_resolve_pso(void)
++{
++    if (g_dresolve_pso) return g_dresolve_pso;
++    if (!ld_scaled_blit_pso(DXGI_FORMAT_R8G8B8A8_UNORM) || !g_sblit_rs) return NULL;   /* the root signature */
++    static const char src[] =
++        "cbuffer C : register(b0) { float4 r; };\n"
++        "Texture2D t0 : register(t0);\n"
++        "SamplerState s0 : register(s0);\n"
++        "struct V { float4 p : SV_Position; float2 uv : TEXCOORD0; };\n"
++        "V vs(uint id : SV_VertexID) {\n"
++        "    V o; float2 q = float2((id << 1) & 2, id & 2);\n"
++        "    o.p = float4(q * float2(2, -2) + float2(-1, 1), 0, 1);\n"
++        "    o.uv = r.xy + (r.zw - r.xy) * q; return o; }\n"
++        "float4 ps(V i) : SV_Target {\n"
++        "    float z = saturate(t0.SampleLevel(s0, i.uv, 0).r);\n"
++        "    uint d = (uint)(z * 16777215.0 + 0.5);\n"
++        "    return float4((float)((d >> 16) & 255u), (float)((d >> 8) & 255u), (float)(d & 255u), 0.0) / 255.0; }\n";
++    ID3DBlob* vs = NULL; ID3DBlob* ps = NULL; ID3DBlob* err = NULL;
++    if (FAILED(D3DCompile(src, sizeof(src) - 1u, "depth_resolve", NULL, NULL, "vs", "vs_5_0", 0, 0, &vs, &err)) ||
++        FAILED(D3DCompile(src, sizeof(src) - 1u, "depth_resolve", NULL, NULL, "ps", "ps_5_0", 0, 0, &ps, &err))) {
++        fprintf(stderr, "[depth-resolve] shader compile failed: %s\n",
++                err ? (const char*)err->lpVtbl->GetBufferPointer(err) : "?");
++        if (err) err->lpVtbl->Release(err);
++        if (vs) vs->lpVtbl->Release(vs);
++        return NULL;
++    }
++    D3D12_GRAPHICS_PIPELINE_STATE_DESC pd = {0};
++    pd.pRootSignature = g_sblit_rs;
++    pd.VS.pShaderBytecode = vs->lpVtbl->GetBufferPointer(vs); pd.VS.BytecodeLength = vs->lpVtbl->GetBufferSize(vs);
++    pd.PS.pShaderBytecode = ps->lpVtbl->GetBufferPointer(ps); pd.PS.BytecodeLength = ps->lpVtbl->GetBufferSize(ps);
++    pd.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
++    pd.SampleMask = 0xFFFFFFFFu;
++    pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
++    pd.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
++    pd.RasterizerState.DepthClipEnable = TRUE;
++    pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
++    pd.NumRenderTargets = 1;
++    pd.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
++    pd.SampleDesc.Count = 1;
++    HRESULT hr = g.dev->lpVtbl->CreateGraphicsPipelineState(g.dev, &pd, &IID_ID3D12PipelineState, (void**)&g_dresolve_pso);
++    vs->lpVtbl->Release(vs); ps->lpVtbl->Release(ps);
++    if (FAILED(hr)) {
++        fprintf(stderr, "[depth-resolve] PSO failed hr=0x%08lX\n", (unsigned long)hr);
++        g_dresolve_pso = NULL;
++    }
++    return g_dresolve_pso;
++}
++int rsx_live_draw_depth_resolve_blit(u32 src_loc, u32 src_abs, u32 src_pitch, u32 ds, u32 dt,
++                                     u32 dst_loc, u32 dst_abs, u32 dst_pitch,
++                                     u32 out_x, u32 out_y, u32 out_w, u32 out_h)
++{
++    static int on = -1;
++    if (on < 0) { const char* e = getenv("LD_DEPTH_RESOLVE"); on = !(e && *e == '0'); }
++    if (!on || !g.ready || !src_pitch || !dst_pitch || !ds || !dt || !out_w || !out_h) return 0;
++    int zi = -1;
++    for (u32 i = 0; i < g.n_zdepths; i++) {
++        const zdepth_t* zz = &g.zdepths[i];
++        if (!zz->tex || zz->location != src_loc || src_abs < zz->offset) continue;
++        const u32 w = zz->snapshot_w ? zz->snapshot_w : zz->w;
++        const u32 h = zz->snapshot_h ? zz->snapshot_h : zz->h;
++        if ((u64)src_abs < (u64)zz->offset + (u64)w * 4u * h) { zi = (int)i; break; }
++    }
++    if (zi < 0) return 0;
++    ID3D12PipelineState* pso = ld_depth_resolve_pso();
++    if (!pso) return 0;
++    ld_ls_invalidate();   /* sets list state the draw path caches */
++    if (!zdepth_snapshot(1u + (u32)zi)) return 0;   /* the last depth-writing pass, R32F, shader-readable */
++    zdepth_t* z = &g.zdepths[zi];
++    const u32 zw = z->snapshot_w ? z->snapshot_w : z->w;
++    const u32 zh = z->snapshot_h ? z->snapshot_h : z->h;
++    if (!zw || !zh) return 0;
++    /* The destination as wide as its rows (pitch / 4): the match copies in two tiles (2044 then 516 source
++     * columns), and each tile sized by its own rect made a surface of its own; the texture reads the full one. */
++    const u32 full_w = dst_pitch / 4u > out_x + out_w ? dst_pitch / 4u : out_x + out_w;
++    u32 di = LD_INVALID_SURFACE;
++    for (u32 i = 0; i < g.n_surfaces; i++) {
++        const surface_t* s = &g.surfaces[i];
++        if (s->tex && s->location == dst_loc && s->offset == dst_abs && s->w == full_w && s->h >= out_y + out_h &&
++            s->fmt == DXGI_FORMAT_R8G8B8A8_UNORM) { di = i; break; }
++    }
++    if (di == LD_INVALID_SURFACE)
++        di = surface_get(dst_loc, dst_abs, full_w, out_y + out_h, DXGI_FORMAT_R8G8B8A8_UNORM);
++    if (di == LD_INVALID_SURFACE || !g.surfaces[di].tex) return 0;
++    g.surfaces[di].pitch = dst_pitch;
++    const u32 off = src_abs - z->offset;
++    const float gx = (float)((off % src_pitch) / 4u), gy = (float)(off / src_pitch);
++    const float sw = (float)out_w * ((float)ds / 1048576.0f), sh = (float)out_h * ((float)dt / 1048576.0f);
++    u32 slots[SRV_TABLE_SIZE];
++    for (u32 i = 0; i < SRV_TABLE_SIZE; i++) slots[i] = SRV_WHITE;
++    slots[0] = SRV_ZDEPTH_BASE + (u32)zi;
++    const D3D12_GPU_DESCRIPTOR_HANDLE table = srv_table(slots);
++    if (!table.ptr) return 0;
++    D3D12_CPU_DESCRIPTOR_HANDLE rtv = rtv_handle(LD_SWAP_BUFFERS + di);
++    g.list->lpVtbl->OMSetRenderTargets(g.list, 1, &rtv, FALSE, NULL);
++    ID3D12DescriptorHeap* heaps[] = {g.srv_heap, g.smp_heap};
++    g.list->lpVtbl->SetDescriptorHeaps(g.list, 2, heaps);
++    g.list->lpVtbl->SetPipelineState(g.list, pso);
++    g.list->lpVtbl->SetGraphicsRootSignature(g.list, g_sblit_rs);
++    const float r[4] = { gx / (float)zw, gy / (float)zh, (gx + sw) / (float)zw, (gy + sh) / (float)zh };
++    g.list->lpVtbl->SetGraphicsRoot32BitConstants(g.list, 0, 4, r, 0);
++    g.list->lpVtbl->SetGraphicsRootDescriptorTable(g.list, 1, table);
++    D3D12_VIEWPORT vp = { (float)out_x, (float)out_y, (float)out_w, (float)out_h, 0.0f, 1.0f };
++    D3D12_RECT sc = { (LONG)out_x, (LONG)out_y, (LONG)(out_x + out_w), (LONG)(out_y + out_h) };
++    g.list->lpVtbl->RSSetViewports(g.list, 1, &vp);
++    g.list->lpVtbl->RSSetScissorRects(g.list, 1, &sc);
++    g.list->lpVtbl->IASetPrimitiveTopology(g.list, D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
++    g.list->lpVtbl->DrawInstanced(g.list, 3, 1, 0, 0);
++    ld_surface_note_write(di, LD_SURFACE_WRITE_COPY);
++    { static int n = 0; if (n++ < 4)
++        fprintf(stderr, "[depth-resolve] zeta %d %u:0x%X (%.0f,%.0f %.0fx%.0f of %ux%u) -> surf %u %u:0x%X (%u,%u %ux%u)\n",
++                zi, z->location, z->offset, gx, gy, sw, sh, zw, zh, di, dst_loc, dst_abs, out_x, out_y, out_w, out_h); }
++    if (s_csv_file && s_csv_gate_open) {
++        fprintf(s_csv_file, "#depth-resolve,%u,%u:0x%X,%u:0x%X,%ux%u\n", g_ld_frames, src_loc, src_abs, dst_loc, dst_abs, out_w, out_h);
++        fflush(s_csv_file);
++    }
+     return 1;
+ }
+ 
+@@ -8978,6 +9106,27 @@
+                         }
+                         break;
+                     }
++            {   /* LD_ZETA_TEX_LOG=1: textures that read a zeta's address (Saka Tsuku cut-scene blur, 2026-11-13) */
++                static int zt_log = -1;
++                if (zt_log < 0) { const char* e = getenv("LD_ZETA_TEX_LOG"); zt_log = e && *e == '1'; }
++                if (zt_log)
++                    for (u32 zi = 0; zi < g.n_zdepths; zi++) {
++                        const zdepth_t* z = &g.zdepths[zi];
++                        if (z->location != t.location || t.offset < z->offset || t.offset >= z->offset + 0x01000000u) continue;
++                        static u32 seen_keys[256]; static u32 n_seen;
++                        const u32 key = (t.location << 31) ^ (t.offset * 2654435761u) ^ (t.format << 20) ^ (t.width << 10) ^ t.height ^ (u << 26);
++                        u32 k2 = 0;
++                        for (; k2 < n_seen; k2++) if (seen_keys[k2] == key) break;
++                        if (k2 == n_seen && n_seen < 256) {
++                            seen_keys[n_seen++] = key;
++                            fprintf(stderr, "[zetatex] unit %u tex %u:0x%X (+0x%X) fmt=0x%02X remap=0x%04X %ux%u pitch=%u -> zeta #%u %u:0x%X draws=%llu dwrite=%llu snap=%d: %s\n",
++                                    u, t.location, t.offset, t.offset - z->offset, t.format, t.remap & 0xFFFFu, t.width, t.height, t.pitch, zi, z->location, z->offset,
++                                    (unsigned long long)z->draws, (unsigned long long)z->depth_write_draws, z->snapshot_valid,
++                                    sampled_depth >= 0 ? "host depth snapshot" : "guest memory");
++                        }
++                        break;
++                    }
++            }
+             if (sampled_depth >= 0) {
+                 slots[u] = SRV_ZDEPTH_BASE + sampled_depth;
+                 g_ld_zdepth_srv_binds++;
+diff --git a/libs/video/rsx_live_draw.h b/libs/video/rsx_live_draw.h
+--- a/libs/video/rsx_live_draw.h
++++ b/libs/video/rsx_live_draw.h
+@@ -95,6 +95,10 @@
+ /* 1 when loc:abs lies in a depth buffer the live renderer keeps only on the GPU
+  * (bound in the last two frames): a guest-memory copy out of it is stale. */
+ int rsx_live_draw_is_gpu_depth(u32 loc, u32 abs);
++/* NV3089 scaled blit out of a GPU-only depth buffer into a colour buffer, drawn on the GPU (1 when done). */
++int rsx_live_draw_depth_resolve_blit(u32 src_loc, u32 src_abs, u32 src_pitch, u32 ds, u32 dt,
++                                     u32 dst_loc, u32 dst_abs, u32 dst_pitch,
++                                     u32 out_x, u32 out_y, u32 out_w, u32 out_h);
+ 
+ /* Block until the GPU finishes all queued draws (RSX SET_REFERENCE / sync
+  * fence). Mirrors RPCS3 nv406e::set_reference's sync() so REF advances only
+diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -1207,6 +1207,16 @@
+         const u32 sl = s_nv3089.src_dma != 0xFEED0001u ? 0u : 1u;
+         const u32 dl = s_gcm2d.dst_dma  != 0xFEED0001u ? 0u : 1u;
+         const u32 u0 = (s_nv3089.in_uv & 0xFFFF) >> 4, v0 = (s_nv3089.in_uv >> 16) >> 4;
++        /* A depth source first (2026-11-13): the match's depth resolve (0x012C0000 -> 0x00B40000, in two tiles)
++         * also falls inside a colour surface's loose range (0x00F00000), and the colour resolve then copied the
++         * final image into the depth texture's left tile (its left part stayed blurred and black at the top). */
++        if (rsx_live_draw_is_gpu_depth(sl, s_nv3089.in_off) &&
++            rsx_live_draw_depth_resolve_blit(sl, s_nv3089.in_off + v0 * in_pitch + u0 * 4u, in_pitch,
++                                             s_nv3089.ds_dx, s_nv3089.dt_dy, dl, s_gcm2d.dst_offset,
++                                             dst_pitch, out_x, out_y, out_w, out_h)) {
++            nv3089_stat(0, 0);
++            return;
++        }
+         const int rok = rsx_live_draw_resolve_blit(sl, s_nv3089.in_off + v0 * in_pitch + u0 * 4u, in_pitch,
+                                         s_nv3089.ds_dx, s_nv3089.dt_dy, dl, s_gcm2d.dst_offset,
+                                         dst_pitch, out_x, out_y, out_w, out_h);
+@@ -1227,6 +1237,14 @@
+         { static int cpu_depth = -1;
+           if (cpu_depth < 0) { const char* e = getenv("NV3089_CPU_DEPTH"); cpu_depth = (e && *e == '1') ? 1 : 0; }
+           if (!rok && !cpu_depth && rsx_live_draw_is_gpu_depth(sl, s_nv3089.in_off)) {
++              /* Drawn on the GPU now (2026-11-13; the depth of field read this copy, so every cut-scene and
++               * in-match event was blurred all over); skipped as before when that cannot be done. */
++              if (rsx_live_draw_depth_resolve_blit(sl, s_nv3089.in_off + v0 * in_pitch + u0 * 4u, in_pitch,
++                                                   s_nv3089.ds_dx, s_nv3089.dt_dy, dl, s_gcm2d.dst_offset,
++                                                   dst_pitch, out_x, out_y, out_w, out_h)) {
++                  nv3089_stat(0, 0);
++                  return;
++              }
+               nv3089_stat(4, (u64)out_w * out_h);
+               return;
+           } }

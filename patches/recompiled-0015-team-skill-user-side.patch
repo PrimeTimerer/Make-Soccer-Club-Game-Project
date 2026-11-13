@@ -1,0 +1,19 @@
+diff --git a/recompiled/ppu_recomp_006.cpp b/recompiled/ppu_recomp_006.cpp
+--- a/recompiled/ppu_recomp_006.cpp
++++ b/recompiled/ppu_recomp_006.cpp
+@@ -37876,6 +37876,7 @@
+         goto loc_002361E8;
+ }
+ 
++extern "C" void saka_team_skill_kickoff_hook(uint32_t entry, uint32_t t);   /* saka_hooks.c cheats (2026-11-13) */
+ void func_002361EC(ppu_context* ctx) {
+     PPU_MM_SNAP
+         uint64_t _cs_25 = ctx->gpr[25];
+@@ -37939,6 +37940,7 @@
+         ctx->gpr[4] = (int64_t)(int32_t)ctx->gpr[25];
+         ctx->gpr[3] = ctx->gpr[29] | 0x0;
+         ctx->lr = 0x002362B8; func_00208AE8(ctx); DRAIN_TRAMPOLINE(ctx);
++        saka_team_skill_kickoff_hook((uint32_t)ctx->gpr[3], (uint32_t)ctx->gpr[25]);   /* cheat: which engine team is the user's */
+         ctx->lr = 0x002362BC; func_002DDD14(ctx); DRAIN_TRAMPOLINE(ctx);
+         ctx->gpr[4] = (int64_t)(int32_t)((uint32_t)0x2 << 16);
+         ctx->gpr[5] = (int64_t)(int32_t)((uint32_t)0x2 << 16);
