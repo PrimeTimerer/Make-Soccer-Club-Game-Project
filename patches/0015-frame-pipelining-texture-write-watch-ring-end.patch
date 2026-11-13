@@ -529,26 +529,6 @@
          if (w && ((w & 0xE0000003u) == 0x20000000u || (w & 3u) == 1u || (w & 3u) == 2u)) {
              s_cf_off[s_cf_i % 8] = s_fifo_getoff; s_cf_w[s_cf_i % 8] = w; s_cf_i++; }
          /* GCM_WORD_STATS=<secs>: NOP words vs headers vs jumps/calls/returns
---- a/main.cpp
-+++ b/main.cpp
-@@ -1210,7 +1210,16 @@
- {
- #ifdef _WIN32
-     AddVectoredExceptionHandler(1, vm_commit_veh);
--    vm_base = (uint8_t*)VirtualAlloc(NULL, VM_SIZE, MEM_RESERVE, PAGE_READWRITE);
-+    /* MEM_WRITE_WATCH: the OS keeps a per-page written bit (the CPU's own
-+     * dirty bit, no faults), so the live renderer re-hashes a cached texture
-+     * only when its pages were written (rsx_live_draw.c ld_ww_*). Hashing every
-+     * bound texture each frame was ~13% of the frame-clock thread in a match.
-+     * PS3_VM_WRITE_WATCH=0 reserves without it (the renderer then hashes). */
-+    { const char* e = getenv("PS3_VM_WRITE_WATCH");
-+      if (!(e && *e == '0'))
-+          vm_base = (uint8_t*)VirtualAlloc(NULL, VM_SIZE, MEM_RESERVE | MEM_WRITE_WATCH, PAGE_READWRITE); }
-+    if (!vm_base)
-+        vm_base = (uint8_t*)VirtualAlloc(NULL, VM_SIZE, MEM_RESERVE, PAGE_READWRITE);
-     ppu_vm_size = 0;              /* the whole space is backed; no OOB guard needed */
- #else
-     /* No vectored exception handlers off Windows, so the arena is mapped up
 --- a/libs/video/rsx_live_draw.h
 +++ b/libs/video/rsx_live_draw.h
 @@ -92,6 +92,9 @@

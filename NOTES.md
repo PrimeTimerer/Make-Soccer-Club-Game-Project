@@ -885,7 +885,7 @@ Boot reaches the following, then stops:
     - Position aptitudes have stat 1 with limit 0, so a "stat ≤ limit" scan misses this roster.
   - **Correction:** the first scan found **0x00F9353C**: another club's roster with the same layout (IDs 0x35C…, the match opponent in that dump). The first converted cheats wrote there. Both were found that same day.
   - Checked in a dump: supporters 2043 and core supporters 100 (the same 100 in the two other copies); the European player list holds player IDs; the young-player records (0x18 bytes) start with their turn count; promotion records hold 0/1 flags and counts.
-- **Engine** (`saka_hooks.c`, end; started from `saka_install_syscall_hooks`; patch `0020-cheat-engine.patch`):
+- **Engine** (`saka_hooks.c`, end; started from `saka_install_syscall_hooks`; it was patch `0020-cheat-engine.patch` until 2026-11-14, see "ps3recomp patch series fixed"):
   - A host thread reads `cheats/BLJM61064.txt` (VitaCheat syntax, PS3 addresses) and `cheats/enabled.txt` (names) when either changes, checked every second.
   - It writes the enabled codes ten times a second, big-endian, only to committed guest memory.
   - Code types: $0/$1/$2 writes and $4 multi-writes; other types are skipped. `SAKA_CHEATS=0` turns it off; the launcher's safe run sets it.
@@ -1452,3 +1452,8 @@ The owner chose **up to three** after the previous session stopped, then clarifi
 - Done (15 archives, 17 textures, ~240 labels): office top bar and money picker (억·만·엔·주·전·후·년차), all training screens (전체 연습 7 items, 자동 휴양 4, 집중육성 비/능력각성 코스/개성강화 코스, 종료 시기), player detail big/small (출전 수·평균 평점·골 수·어시스트 수, 계약·잔여·연봉·성적, 아시아/외국인 쿼터, 우·좌·양), tactics (게임 플랜/자동 휴양 tabs, 교체 슬롯, 대전 상대, game plan screen 30 labels, 공수특), personnel top, coach detail (연봉, 육성·인망·지휘·전술, 중앙/사이드/점유율/속공/후퇴 수비/프레스/커버/플랫, 잔여년), scout detail (14 regions, 선수/교섭/신예/코치, 억/만엔/연봉), schedule (주·전·후, 홈 경기/원정/중립, 영업부 조언, 보유 프로모션, camp note), match result (48 labels: supporters, income report, ranking, match report, 오프사이드/경고(퇴장)/점유율). Terms follow the Korean patch's own text (출전 수, 신예발굴, 비밀협상, 점유율 축구 → 점유율, 후퇴 수비).
 - In game (bench with `PS3_USRDIR_OVERLAY=game\mods\korean`): office bar, training top tabs, 전체 연습, 집중육성, 자동 휴양 (the moved texture) and the personnel top were seen in Korean; the others were checked on the previews only.
 - Left Japanese: the four grunge stamps of the game plan screen (text cut into slanted textured bars), and the screens not in this batch (match-day popups, month start, player profile, team rest, analysis, the rest of the 171 screen archives).
+
+## ps3recomp patch series fixed (2026-11-14, owner: "예전 패치 0015 0016 0020 0021도 고쳐줘")
+- `git -C ps3recomp apply ../patches/00NN-*.patch` failed from 0015 on: 0015, 0016, 0019 and 0021 also held sections for files of this repository (`main.cpp`; 0021 also this repository's `CMakeLists.txt`), and 0020 was only `saka_hooks.c`. `git apply` is all-or-nothing per patch, so those patches and the ones built on them (0017, 0019, 0024) did not apply.
+- Those sections were dropped (they are committed here directly) and 0020 was removed. One change had no patch at all: the nv3089 "depth-skip" path and its statistics in `cellGcmSys.c` (19 lines); 0024 now goes from the state after 0023 to the current depth code, so it carries them too.
+- Check: a clean v0.18.0 checkout (4e8f3ca) with 0001-0026 applied in order equals the working submodule in all 28 changed files (line endings aside).

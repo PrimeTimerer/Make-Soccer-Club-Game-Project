@@ -181,6 +181,31 @@ diff --git a/libs/video/rsx_live_draw.h b/libs/video/rsx_live_draw.h
 diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
 --- a/libs/video/cellGcmSys.c
 +++ b/libs/video/cellGcmSys.c
+@@ -1099,20 +1099,20 @@
+ /* [nv3089] every 5 s: blits per path and the pixels the CPU moved, so a
+  * frame-time question can see which copy costs it. NV3089_STATS=0 = quiet.
+  * path 0 = GPU resolve only, 1 = swizzled pyramid (CPU), 2 = row copy (CPU),
+- * 3 = per-pixel copy (CPU). */
++ * 3 = per-pixel copy (CPU), 4 = skipped copy out of a GPU-only depth buffer. */
+ static void nv3089_stat(int path, u64 px)
+ {
+     static int on = -1;
+-    static unsigned n[4]; static u64 p[4]; static unsigned long long t0;
++    static unsigned n[5]; static u64 p[5]; static unsigned long long t0;
+     if (on < 0) { const char* e = getenv("NV3089_STATS"); on = !(e && *e == '0'); }
+     if (!on) return;
+     n[path]++; p[path] += px;
+     const unsigned long long now = ps3_ms_now();
+     if (!t0) t0 = now;
+     if (now - t0 >= 5000) {
+-        fprintf(stderr, "[nv3089] last 5 s: gpu=%u swz=%u/%llukpx row=%u/%llukpx pix=%u/%llukpx\n",
++        fprintf(stderr, "[nv3089] last 5 s: gpu=%u swz=%u/%llukpx row=%u/%llukpx pix=%u/%llukpx depth-skip=%u/%llukpx\n",
+                 n[0], n[1], (unsigned long long)(p[1] / 1000), n[2], (unsigned long long)(p[2] / 1000),
+-                n[3], (unsigned long long)(p[3] / 1000));
++                n[3], (unsigned long long)(p[3] / 1000), n[4], (unsigned long long)(p[4] / 1000));
+         memset(n, 0, sizeof n); memset(p, 0, sizeof p); t0 = now;
+     }
+ }
 @@ -1207,6 +1207,16 @@
          const u32 sl = s_nv3089.src_dma != 0xFEED0001u ? 0u : 1u;
          const u32 dl = s_gcm2d.dst_dma  != 0xFEED0001u ? 0u : 1u;
@@ -198,10 +223,18 @@ diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
          const int rok = rsx_live_draw_resolve_blit(sl, s_nv3089.in_off + v0 * in_pitch + u0 * 4u, in_pitch,
                                          s_nv3089.ds_dx, s_nv3089.dt_dy, dl, s_gcm2d.dst_offset,
                                          dst_pitch, out_x, out_y, out_w, out_h);
-@@ -1227,6 +1237,14 @@
-         { static int cpu_depth = -1;
-           if (cpu_depth < 0) { const char* e = getenv("NV3089_CPU_DEPTH"); cpu_depth = (e && *e == '1') ? 1 : 0; }
-           if (!rok && !cpu_depth && rsx_live_draw_is_gpu_depth(sl, s_nv3089.in_off)) {
+@@ -1219,6 +1229,25 @@
+         { static int cpu = -1;
+           if (cpu < 0) { const char* e = getenv("NV3089_CPU_RESOLVE"); cpu = (e && *e == '1') ? 1 : 0; }
+           if (rok && !cpu) { nv3089_stat(0, 0); return; } }
++        /* A resolve out of a depth buffer the renderer keeps only on the GPU
++         * (the match resolves its 2560x1440 depth 0x012C0000 into 0x00B40000
++         * this way) has no GPU path, and guest memory there holds nothing the
++         * draws wrote: the CPU copy below would move stale bytes, ~7% of this
++         * thread. NV3089_CPU_DEPTH=1 keeps the copy. */
++        { static int cpu_depth = -1;
++          if (cpu_depth < 0) { const char* e = getenv("NV3089_CPU_DEPTH"); cpu_depth = (e && *e == '1') ? 1 : 0; }
++          if (!rok && !cpu_depth && rsx_live_draw_is_gpu_depth(sl, s_nv3089.in_off)) {
 +              /* Drawn on the GPU now (2026-11-13; the depth of field read this copy, so every cut-scene and
 +               * in-match event was blurred all over); skipped as before when that cannot be done. */
 +              if (rsx_live_draw_depth_resolve_blit(sl, s_nv3089.in_off + v0 * in_pitch + u0 * 4u, in_pitch,
@@ -210,6 +243,9 @@ diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
 +                  nv3089_stat(0, 0);
 +                  return;
 +              }
-               nv3089_stat(4, (u64)out_w * out_h);
-               return;
-           } }
++              nv3089_stat(4, (u64)out_w * out_h);
++              return;
++          } }
+     }
+     /* Only the 32-bit colour formats are handled; anything else would need a
+      * per-format converter and is better skipped loudly than written wrong. */

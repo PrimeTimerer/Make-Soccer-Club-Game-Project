@@ -27,7 +27,7 @@ This is a native PC port of **サカつく プロサッカークラブをつく�
 | --- | --- |
 | `game/` (not in the repository) | `EBOOT.ELF` (1.03), `dev_bdvd/` (disc), `dev_hdd0/` (1.03 update), `firmware/` |
 | `gamedata/` (not in the repository) | Saves and backups |
-| `patches/` | Patches to the `ps3recomp` submodule (`git -C ps3recomp apply ../patches/00NN-*.patch`, in number order) and patches to the recompiled code (`recompiled-*`) |
+| `patches/` | Patches to the `ps3recomp` submodule (`git -C ps3recomp apply ../patches/00NN-*.patch`, in number order, on the pinned v0.18.0 commit) and patches to the recompiled code (`recompiled-*`) |
 | `tools/launcher/` | The launcher (C#/WPF, .NET Framework 4) |
 | `NOTES.md` | The full record of how the port was made and what was analyzed |
 
@@ -37,7 +37,7 @@ Ready-to-run builds are on the [Releases](https://github.com/PrimeTimerer/Make-S
 
 ## Build (Windows)
 
-1. Run `git clone --recursive`, then apply the `patches/0001`, `0002`, … patches to `ps3recomp` in order.
+1. Run `git clone --recursive`, then apply the `patches/0001`, `0002`, … patches to `ps3recomp` in order. There is no 0020: the cheat engine is `saka_hooks.c` in this repository.
 2. Build `recompiled/`, `prx_src/` and `spu_jobs/` from your own game files, then configure and build `build-release/` with CMake (Release, Ninja, clang-cl). `PORT_SPU_INPUTS` lists `game/EBOOT.ELF`, `game/firmware/libsre.prx`, `game/firmware/libspurs_jq.prx` and the `spu_jobs/cri_*.elf` files.
    - Requires Visual Studio 2022 with clang-cl, Ninja, and Python in `.venv`.
    - The conversion process is recorded in `NOTES.md`.
