@@ -61,8 +61,10 @@ PREVIEW = ROOT / "logs/korean_ui"
 
 def L(region, text, mode="clear", **kw):
     """region (x0, y0, x1, y1) around ONE label (no other drawing inside); mode: clear (transparent background),
-    fill (flat colour of the region's border), patch (copy from the same-size area at offset kw['src'] = (dx, dy)).
+    fill (flat colour of the region's border), patch (copy from the same-size area at offset kw['src'] = (dx, dy)),
+    inpaint (only the label's own pixels, replaced by the median of the nearest background pixels).
     Options: vertical (one character per line), align (center/left/right), shear (italic slant, e.g. 0.18),
+    rotate (degrees counter-clockwise, for tilted badge text), grow (inpaint: px added around the label's pixels),
     weight (bold/regular), color (r, g, b), size (font px), pad (erase margin, default 2), thr (contrast)."""
     return dict(region=region, text=text, mode=mode, **kw)
 
@@ -234,6 +236,13 @@ LABELS = {
         L((783, 853, 889, 875), "경고(퇴장)"), L((889, 853, 940, 875), "점유율"),
     ]},
 }
+# the remaining screens (2026-11-14, owner: "남은 화면 한글화도 이어서"): generated label data in korean_ui_more.py
+try:
+    from korean_ui_more import MORE  # noqa: E402
+except ImportError:
+    MORE = {}
+for _rel, _members in MORE.items():
+    LABELS.setdefault(_rel, {}).update(_members)
 
 
 # ---- image work --------------------------------------------------------------------------------------------------
@@ -247,6 +256,16 @@ def find_ink(im, lab):
     x0, y0, x1, y1 = lab["region"]
     px = im.load()
     pts = [(x, y) for y in range(y0, y1) for x in range(x0, x1)]
+    if lab.get("ink") == "light":   # light text on a dark opaque disc/tile (badges): bright opaque pixels only
+        lum = lab.get("lum", 150)
+        ink = {p for p in pts if px[p][3] > 128 and (px[p][0] * 3 + px[p][1] * 6 + px[p][2]) // 10 > lum}
+        if not ink:
+            raise ValueError("no label pixels in %s (%s)" % (lab["region"], lab["text"]))
+        rest = [px[p] for p in pts if p not in ink and px[p][3] > 128] or [px[p] for p in pts]
+        bg = tuple(median([c[k] for c in rest]) for k in range(4))
+        xs, ys = [q[0] for q in ink], [q[1] for q in ink]
+        color = lab.get("color") or tuple(median([px[q][k] for q in ink]) for k in range(3))
+        return ink, (min(xs), min(ys), max(xs) + 1, max(ys) + 1), color, bg
     if lab["mode"] == "clear":
         # the background: the border's median colour WITH its alpha (fully transparent, or a faint panel such as
         # the coach detail's tactic bars at alpha 24-51), so erasing restores the panel instead of punching a hole
@@ -265,6 +284,23 @@ def find_ink(im, lab):
         def diff(c):
             return max(abs(c[k] - bg[k]) for k in range(3))
         ink = {p for p in pts if diff(px[p]) > thr}
+        if lab.get("lines"):   # drop strokes that run out of the region (ribbon outlines around arched text)
+            left, seen = set(ink), set()
+            for start in list(ink):
+                if start in seen:
+                    continue
+                comp, stack = [], [start]
+                seen.add(start)
+                while stack:
+                    x, y = stack.pop()
+                    comp.append((x, y))
+                    for q in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1), (x + 1, y + 1), (x - 1, y - 1), (x + 1, y - 1), (x - 1, y + 1)):
+                        if q in ink and q not in seen:
+                            seen.add(q)
+                            stack.append(q)
+                if any(x in (x0, x1 - 1) or y in (y0, y1 - 1) for x, y in comp):
+                    left -= set(comp)
+            ink = left
         ranked = sorted(ink, key=lambda p: -diff(px[p]))
         strong = [px[p] for p in ranked[: max(1, len(ranked) // 3)]]
     if not ink:
@@ -273,6 +309,49 @@ def find_ink(im, lab):
     bbox = (min(xs), min(ys), max(xs) + 1, max(ys) + 1)
     color = lab.get("color") or tuple(median([c[k] for c in strong]) for k in range(3))
     return ink, bbox, color, bg
+
+
+def inpaint(im, lab, ink, bg):
+    """Replace only the label's pixels (grown by `grow` px for anti-aliased edges) with the per-channel median of
+    the nearest non-label pixels, so textured paper, grunge and semi-transparent panels keep their look instead of
+    getting a flat patch. Pixels that look like ink (same test as the label's) are never sampled, so neighbouring
+    labels outside the region do not bleed in."""
+    x0, y0, x1, y1 = lab["region"]
+    W, H = im.size
+    px = im.load()
+    mask = set(ink)
+    for _ in range(lab.get("grow", 1)):
+        mask |= {(x + dx, y + dy) for (x, y) in mask for dx in (-1, 0, 1) for dy in (-1, 0, 1)}
+    mask = {(x, y) for (x, y) in mask if x0 <= x < x1 and y0 <= y < y1}
+    transparent = lab.get("transparent")
+    if lab.get("ink") == "light":
+        lum = lab.get("lum", 150)
+
+        def inky(c):
+            return c[3] > 128 and (c[0] * 3 + c[1] * 6 + c[2]) // 10 > lum
+    elif transparent:
+        cut = max(60, min(250, bg[3] + 50))
+
+        def inky(c):
+            return c[3] > cut
+    else:
+        thr = lab.get("thr", 50)
+
+        def inky(c):
+            return max(abs(c[k] - bg[k]) for k in range(3)) > thr
+    src = im.copy()
+    spx = src.load()
+    for (x, y) in mask:
+        vals = []
+        for r in (2, 3, 4, 6, 8, 12):
+            vals = [spx[i, j] for j in range(max(0, y - r), min(H, y + r + 1)) for i in range(max(0, x - r), min(W, x + r + 1))
+                    if (i, j) not in mask and not inky(spx[i, j]) and (transparent or spx[i, j][3] >= 128)]
+            if len(vals) >= 6:
+                break
+        if vals:
+            px[x, y] = tuple(sorted(v[k] for v in vals)[len(vals) // 2] for k in range(4))
+        else:
+            px[x, y] = bg if bg[3] >= 8 else (0, 0, 0, 0)
 
 
 def erase(im, lab, bbox, bg):
@@ -305,27 +384,51 @@ def text_layer(lab, size, color):
     gap = max(1, size // 8)
     w = max(b[2] - b[0] for b in boxes)
     h = lh * len(lines) + gap * (len(lines) - 1)
-    layer = Image.new("RGBA", (w + 8, h + 8), (0, 0, 0, 0))
-    d = ImageDraw.Draw(layer)
+    # the glyphs as a coverage mask, slanted as a mask, then one solid colour: interpolating RGBA directly gave the
+    # nearly transparent edge pixels stray colours (e.g. (127, 0, 0, 2)) that spoiled whole DXT5 blocks
+    mask = Image.new("L", (w + 8, h + 8), 0)
+    d = ImageDraw.Draw(mask)
     align = lab.get("align", "center")
     for i, (ln, b) in enumerate(zip(lines, boxes)):
         lw = b[2] - b[0]
         x = 4 + (0 if align == "left" else w - lw if align == "right" else (w - lw) // 2) - b[0]
         y = 4 + i * (lh + gap) - b[1]
-        d.text((x, y), ln, font=font, fill=tuple(color) + (255,))
+        d.text((x, y), ln, font=font, fill=255)
     shear = lab.get("shear", 0)
     if shear:
-        extra = int(abs(shear) * layer.height) + 1
-        wide = Image.new("RGBA", (layer.width + extra, layer.height), (0, 0, 0, 0))
-        wide.paste(layer, (0, 0))
-        layer = wide.transform(wide.size, Image.AFFINE, (1, shear, -shear * layer.height, 0, 1, 0), Image.BICUBIC)
-    box = layer.getbbox()
+        extra = int(abs(shear) * mask.height) + 1
+        wide = Image.new("L", (mask.width + extra, mask.height), 0)
+        wide.paste(mask, (0, 0))
+        mask = wide.transform(wide.size, Image.AFFINE, (1, shear, -shear * mask.height, 0, 1, 0), Image.BICUBIC)
+    if lab.get("rotate"):   # degrees, counter-clockwise (badges with tilted text)
+        mask = mask.rotate(lab["rotate"], resample=Image.BICUBIC, expand=True)
+    layer = Image.new("RGBA", mask.size, tuple(color) + (0,))
+    layer.putalpha(mask)
+    box = mask.getbbox()
     return layer.crop(box) if box else layer
 
 
 def draw_label(im, lab):
-    ink, bbox, color, bg = find_ink(im, lab)
-    erase(im, lab, bbox, bg)
+    if lab.get("draw_only"):   # text only, on background other labels of the list already cleared
+        x0, y0, x1, y1 = lab["region"]
+        size = lab["size"]
+        layer = text_layer(lab, size, lab["color"])
+        while (layer.width > x1 - x0 or layer.height > y1 - y0) and size > 8:
+            size -= 1
+            layer = text_layer(lab, size, lab["color"])
+        im.alpha_composite(layer, ((x0 + x1 - layer.width) // 2, (y0 + y1 - layer.height) // 2))
+        return lab["region"], size, lab["color"]
+    if lab["mode"] == "inpaint":   # sprite on transparency (gaps between strokes) -> alpha ink, else colour ink
+        x0, y0, x1, y1 = lab["region"]
+        px = im.load()
+        tr = lab.get("ink") != "light" and             sum(1 for y in range(y0, y1) for x in range(x0, x1) if px[x, y][3] < 8) > (x1 - x0) * (y1 - y0) * 0.15
+        ink, bbox, color, bg = find_ink(im, dict(lab, mode="clear" if tr else "fill"))
+        inpaint(im, dict(lab, transparent=tr), ink, bg)
+    else:
+        ink, bbox, color, bg = find_ink(im, lab)
+        erase(im, lab, bbox, bg)
+    if not lab["text"]:   # erase only (the text comes from a draw_only label)
+        return bbox, 0, color
     x0, y0, x1, y1 = lab["region"]
     bw, bh = bbox[2] - bbox[0], bbox[3] - bbox[1]
     n = len(lab["text"]) if lab.get("vertical") else lab["text"].count("\n") + 1
@@ -359,21 +462,31 @@ def encode_like(original, im):
         return original[:128] + im.tobytes("raw", "BGRA") + original[128 + w * h * 4:]
     assert fourcc == b"DXT5", fourcc
     old = Image.open(BytesIO(original)).convert("RGBA")
-    buf = BytesIO()
-    im.save(buf, "DDS", pixel_format="DXT5")
-    enc = buf.getvalue()[128:128 + (w // 4) * (h // 4) * 16]
-    out = bytearray(original)
     opx, npx = old.load(), im.load()
     bw = w // 4
-    changed = 0
-    for by in range(h // 4):
-        for bx in range(bw):
-            same = all(opx[bx * 4 + i, by * 4 + j] == npx[bx * 4 + i, by * 4 + j] for j in range(4) for i in range(4))
-            if not same:
-                k = (by * bw + bx) * 16
-                out[128 + k:128 + k + 16] = enc[k:k + 16]
-                changed += 1
-    return bytes(out), changed
+    blocks = [(bx, by) for by in range(h // 4) for bx in range(bw)
+              if any(opx[bx * 4 + i, by * 4 + j] != npx[bx * 4 + i, by * 4 + j] for j in range(4) for i in range(4))]
+    # the encoder weighs every pixel's colour alike: give the nearly transparent pixels of a changed block the
+    # block's alpha-weighted colour, so their (invisible) RGB cannot pull the block's two colour endpoints away
+    clean = im.copy()
+    cpx = clean.load()
+    for bx, by in blocks:
+        pts = [(bx * 4 + i, by * 4 + j) for j in range(4) for i in range(4)]
+        heavy = [npx[p] for p in pts if npx[p][3] >= 32]
+        if heavy and len(heavy) < 16:
+            wt = sum(c[3] for c in heavy)
+            mean = tuple(int(round(sum(c[k] * c[3] for c in heavy) / wt)) for k in range(3))
+            for p in pts:
+                if npx[p][3] < 32:
+                    cpx[p] = mean + (npx[p][3],)
+    buf = BytesIO()
+    clean.save(buf, "DDS", pixel_format="DXT5")
+    enc = buf.getvalue()[128:128 + (w // 4) * (h // 4) * 16]
+    out = bytearray(original)
+    for bx, by in blocks:
+        k = (by * bw + bx) * 16
+        out[128 + k:128 + k + 16] = enc[k:k + 16]
+    return bytes(out), len(blocks)
 
 
 CREATED = PREVIEW / "created.txt"   # overlay files this tool made (no Korean patch file under them)
@@ -409,7 +522,11 @@ def process(rel, members, preview):
         before = im.copy()
         notes = []
         for lab in members[name]:
-            bbox, size, color = draw_label(im, lab)
+            try:
+                bbox, size, color = draw_label(im, lab)
+            except ValueError as e:   # one bad region must not stop the archive (the label stays Japanese)
+                print("    SKIPPED", e)
+                continue
             notes.append("%s %s %dpx" % (lab["text"].replace("\n", "/"), bbox, size))
         result = encode_like(payload, im)
         new, changed = result if isinstance(result, tuple) else (result, -1)

@@ -1453,6 +1453,23 @@ The owner chose **up to three** after the previous session stopped, then clarifi
 - In game (bench with `PS3_USRDIR_OVERLAY=game\mods\korean`): office bar, training top tabs, 전체 연습, 집중육성, 자동 휴양 (the moved texture) and the personnel top were seen in Korean; the others were checked on the previews only.
 - Left Japanese: the four grunge stamps of the game plan screen (text cut into slanted textured bars), and the screens not in this batch (match-day popups, month start, player profile, team rest, analysis, the rest of the 171 screen archives).
 
+## Korean UI images, remaining screens (2026-11-14, owner: "남은 화면 한글화도 이어서 해줘")
+- Triage: the 156 remaining sb/sb2/sb3 screen archives (net_* left out) were dumped; about 90 textures carry Japanese. sb2 is backgrounds and maps (only the world map's region names had Japanese).
+- Workflow: a block detector numbers the text on each texture (alpha for sprites near transparency, one-polarity contrast on opaque panels so the gaps between lines never join, thin rules removed, blocks cut per line). Specs map block numbers or explicit rectangles to Korean; side-by-side sprites are cut at their gaps or by character counts. A converter writes explicit `L()` entries to `tools/korean_ui_more.py`, which `korean_ui_labels.py` merges into `LABELS`. The detector, converter, specs and block data are kept in `logs/korean_ui/work` (local).
+- Tool additions: `inpaint` mode (only the label's own pixels are replaced by the median of the nearest background pixels, so paper, grunge and semi-transparent panels keep their texture; the generated labels use it), `ink="light"` (light text on dark discs), `lines`, `rotate`, `keep`, erase-only labels (text "") and `draw_only` labels (the three ribbon menus of the player edit are rebuilt from the clean 顔 ribbon, then the Korean is drawn straight).
+- Fixes: italic text is now drawn as a coverage mask and coloured afterwards. Interpolating RGBA had left near-transparent pixels such as (127, 0, 0, 2), and those turned whole DXT5 blocks red. Changed DXT5 blocks also get the alpha-weighted block colour in their near-transparent pixels before encoding. A label whose region finds nothing prints `SKIPPED` instead of stopping the archive. `sb/game_plan.par` was rendered again with the fixes.
+- Done: 69 archives, 78 textures, 889 labels (with the main screens: 84 archives).
+  - Batch 1: month report, match-day popups, player profile/report, team rest, analysis, clubhouse, facilities, stadium, sponsors, scout search, topic, title-menu items, save/load/cross save/club data save, options, interview, offer, camp, promotions, role setup list, all sb3 list headers.
+  - Batch 2: award ranking, club check result, club records, small coach detail, contract extension, experience, award flags, offer confirmation, info menu, activity report, loan deal, manager detail, manifesto, youth discovery week, hall of fame, skill and trait panels, policy, player ranking, record totals, trophies, scout region list, secret negotiation, manager style, supporter voice, tactics pattern/setting, world map.
+  - Batch 3: new-game club select; league select (names, 21 description lines, rules); club edit name and uniform; player edit top, sub plates, detail info, ribbon menu, result labels, slot labels, select rows.
+- In game (bench with the overlay): the construction menu (경기장 / 클럽 하우스) and the stadium screen (서포터 … 명, 클럽 인기, 만족·집객·수입) were seen in Korean. The rest was checked on previews only.
+- Left Japanese:
+  - the trait badges: 22 round badges with tilted two-line text in `edit_player_result`, and the same set in the slot machine (the tool now has `rotate` and `ink="light"` for them);
+  - the character-collection profiles (2 textures of descriptions);
+  - the manager face edit part names (face04/faceB03/kantoku02);
+  - the rest of the secretary edit, the tactics screen's vertical kana glyphs, the tilted cards of the hall of fame;
+  - the stamps (発掘中, 実行中), tiny decorative print, the magazine covers of `edit_close`.
+
 ## ps3recomp patch series fixed (2026-11-14, owner: "예전 패치 0015 0016 0020 0021도 고쳐줘")
 - `git -C ps3recomp apply ../patches/00NN-*.patch` failed from 0015 on: 0015, 0016, 0019 and 0021 also held sections for files of this repository (`main.cpp`; 0021 also this repository's `CMakeLists.txt`), and 0020 was only `saka_hooks.c`. `git apply` is all-or-nothing per patch, so those patches and the ones built on them (0017, 0019, 0024) did not apply.
 - Those sections were dropped (they are committed here directly) and 0020 was removed. One change had no patch at all: the nv3089 "depth-skip" path and its statistics in `cellGcmSys.c` (19 lines); 0024 now goes from the state after 0023 to the current depth code, so it carries them too.
