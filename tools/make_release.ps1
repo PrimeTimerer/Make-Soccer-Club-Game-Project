@@ -29,7 +29,7 @@ foreach ($f in 'README.md', 'LICENSE') {   # no bat files: the launcher starts t
     if (Test-Path -LiteralPath $p) { Copy-Item -LiteralPath $p -Destination $out }
 }
 # Shared cheat lists only; the personal ones are made by the launcher and the game.
-$personal = 'enabled.txt', 'values.txt', 'players.txt', 'lists.txt'
+$personal = 'enabled.txt', 'values.txt', 'players.txt', 'lists.txt', 'training.txt', 'staff.txt'
 Get-ChildItem -LiteralPath (Join-Path $root 'cheats') -Filter *.txt -File | Where-Object { $personal -notcontains $_.Name } |
     Copy-Item -Destination (Join-Path $out 'cheats')
 
