@@ -1,0 +1,71 @@
+# 팀컬러 이름 (tools/make_teamcolors.py가 만듦): color id 한국어 일본어 종류(line 라인: 선발의 플레이스타일·포지션, tactics 전술 값, policy 선수 방침) 미사용(1 = 게임이 쓰지 않는 팀컬러) 키 플레이어(KEY)의 오리지널 스킬
+color	1	트리플 타워	トリプルタワー	line	0	0
+color	2	트리플 스트라이커	トリプルストライカー	line	0	0
+color	3	트라이앵글 어택	トライアングルアタック	line	0	0
+color	4	트리플 드라이브·FW	トリプルドライブ・ＦＷ	line	0	0
+color	5	사이드 어택·FW	サイドアタック・ＦＷ	line	0	0
+color	6	고속 공격	高速アタック	line	0	168
+color	7	센터 어택·FW	センターアタック・ＦＷ	line	0	0
+color	8	박스의 패자	ボックスの覇者	line	0	163
+color	9	무자비한 3연포	無慈悲な三連砲	line	0	162
+color	10	1톱 2섀도	１トップ２シャドー	line	0	160
+color	11	제로 톱	ゼロトップ	line	0	179
+color	12	트리플 드라이브·MF	トリプルドライブ・ＭＦ	line	0	0
+color	13	더 드리블러즈	ザ・ドリブラーズ	line	1	0
+color	14	트리플 패서	トリプルパサー	line	0	0
+color	15	티키타카	チキタカ	line	1	0
+color	16	트리플 어택	トリプルアタック	line	0	0
+color	17	라인 브레이커즈	ラインブレイカーズ	line	1	0
+color	18	트리플 엔진	トリプルエンジン	line	0	0
+color	19	박스 투 박스	ボックス・トゥ・ボックス	line	1	0
+color	20	트리플 차지	トリプルチャージ	line	0	0
+color	21	다이너마이트 차지	ダイナマイトチャージ	line	1	0
+color	22	측면강화·MF	サイド強化・ＭＦ	line	0	0
+color	23	철벽의 측면강화·MF	鉄壁のサイド強化・ＭＦ	line	1	172
+color	24	사이드 어택·MF	サイドアタック・ＭＦ	line	0	0
+color	25	노도의 사이드 어택·MF	怒涛のサイドアタック・ＭＦ	line	1	169
+color	26	밸런스·MF	バランス・ＭＦ	line	0	0
+color	27	센터 강화·MF	センター強化・ＭＦ	line	0	0
+color	28	철벽의 센터 강화·MF	鉄壁のセンター強化・ＭＦ	line	1	178
+color	29	센터 어택·MF	センターアタック・ＭＦ	line	0	0
+color	30	노도의 센터 어택·MF	怒涛のセンターアタック・ＭＦ	line	1	161
+color	31	패스 & 무브	パス＆ムーブ	line	0	0
+color	32	매혹의 패스 & 무브	魅惑のパス＆ムーブ	line	1	177
+color	33	레지스타 시스템	レジスタシステム	line	0	0
+color	34	더블 레지스타 시스템	ダブルレジスタシステム	line	1	165
+color	35	트리플 스토퍼	トリプルストッパー	line	0	0
+color	36	견고한 DF 콰르텟	堅牢堅固のＤＦカルテット	line	1	0
+color	37	트리플 스위퍼	トリプルスイーパー	line	0	0
+color	38	신출귀몰한 DF 콰르텟	神出鬼没のＤＦカルテット	line	1	0
+color	39	트리플 리베로	トリプルリベロ	line	0	0
+color	40	변환자재의 DF 콰르텟	変幻自在のＤＦカルテット	line	1	0
+color	41	측면강화·DF	サイド強化・ＤＦ	line	0	0
+color	42	수비적인 DF 라인	守備的なＤＦライン	line	1	171
+color	43	난공불락의 DF 라인	難攻不落なＤＦライン	line	1	174
+color	44	사이드 어택·DF	サイドアタック・ＤＦ	line	0	0
+color	45	공격적인 DF 라인	攻撃的なＤＦライン	line	1	173
+color	46	용맹과감한 DF 라인	勇猛果敢なＤＦライン	line	1	175
+color	47	밸런스·DF	バランス・ＤＦ	line	0	0
+color	48	라인 수비	ラインディフェンス	tactics	0	0
+color	49	스위퍼 시스템	スイーパーシステム	tactics	0	0
+color	50	짧은 카운터	ショートカウンター	tactics	0	0
+color	51	롱 카운터	ロングカウンター	tactics	0	0
+color	52	짧은 패스 축구	ショートパスサッカー	tactics	0	0
+color	53	점유율 축구	ポゼッションサッカー	tactics	0	0
+color	54	포어 체크	フォアチェック	tactics	0	0
+color	55	후퇴 수비	リトリート	tactics	0	0
+color	56	공간을 막아	スペースを潰す	tactics	0	0
+color	57	내려서 수비	引いて守る	tactics	0	0
+color	58	측면강화·ALL	サイド強化・ＡＬＬ	tactics	0	0
+color	59	사이드 어택·ALL	サイドアタック・ＡＬＬ	tactics	0	0
+color	60	밸런스·ALL	バランス・ＡＬＬ	tactics	0	0
+color	61	센터 강화·ALL	センター強化・ＡＬＬ	tactics	0	0
+color	62	센터 어택·ALL	センターアタック・ＡＬＬ	tactics	0	0
+color	63	역습 중시	カウンター重視	policy	0	0
+color	64	초·역습 중시	超・カウンター重視	policy	0	0
+color	65	점유율 중시	ポゼッション重視	policy	0	0
+color	66	초·점유율 중시	超・ポゼッション重視	policy	0	0
+color	67	개인능력 중시	個人能力重視	policy	0	0
+color	68	초·개인능력 중시	超・個人能力重視	policy	0	0
+color	69	조직력 중시	組織力重視	policy	0	0
+color	70	초·조직력 중시	超・組織力重視	policy	0	0

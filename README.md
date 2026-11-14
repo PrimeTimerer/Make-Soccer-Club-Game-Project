@@ -18,7 +18,7 @@ This is a native PC port of **サカつく プロサッカークラブをつく�
   - Settings, saves and backups, and cheats.
   - Player and list editors. They read the running game or a save slot you choose.
   - Korean patch.
-- **In game (F2, or L3+R3 on a pad):** the cheat menu, with cheats, players and lists. F7 is double speed and F8 is turbo.
+- **In game (F2, or L3+R3 on a pad):** the cheat menu, with cheats, players, lists, training slots, staff and team colors. F6 forces a skill play of your team in a match, F7 is double speed and F8 is turbo.
 - **Korean patch:** the original files stay untouched; the game reads the Korean files from `game\mods\korean` instead. To turn it on, go to launcher settings → Korean patch, and install it from the patch exe.
 
 ## Folders

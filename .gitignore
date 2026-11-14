@@ -21,6 +21,8 @@ cheats/enabled.txt
 cheats/values.txt
 cheats/players.txt
 cheats/lists.txt
+cheats/teamcolor.txt
+cheats/teamcolor_backup.txt
 cheats/live/
 
 # Generated from the player's own EBOOT and firmware, or analysis of them (bring your own disc)

@@ -83,8 +83,11 @@ void setSpeed(int speed)
 bool speedBadge();   // below: the speed is up, or was changed in the last 2 s
 
 // F6: super play (2026-11-13, owner: "슈퍼플레이 ... 버튼을 눌러서 마음대로 작동"): saka_hooks.c switch 23 arms the next
-// skill roll of the user's team for 20 s; the badge says so, or that the cheat is off.
+// play of the user's team (2026-11-14: until it is used, with every skill that fits the play); the badge says so, or
+// that the cheat is off.
 extern "C" int saka_superplay_arm(void);
+extern "C" int saka_superplay_state(void);   // 0 idle, 1 armed, 2 used in the last 3 s
+#include "saka_teamcolor.h"   // the team color fit's state (2026-11-14)
 std::atomic<int> g_superShownAt{-100000};
 std::atomic<int> g_superArmed{0};
 
@@ -1930,7 +1933,7 @@ void trainingPanel()
         ImGui::PushID(row);
         const uint32_t ea = sp ? 0x00EE83A8u + 0xCu * slot : 0x00EE83CCu + 0x20u * slot;
         const uint32_t curId = rd32(ea);
-        const int curSub = sp ? 0 : (int)rd32(ea + 4);
+        const int curSub = sp ? 0 : (int)rd8(ea + 4);   // the kind is the byte at +4 (2026-11-14)
         const int curCourse = (int)rd32(ea + (sp ? 4 : 8));
         const int weeks = rd8(ea + (sp ? 8 : 0xC));
         const Names& curNames = sp ? g_text.spCourses : curSub ? g_text.awakCourses : g_text.persCourses;
@@ -2201,6 +2204,194 @@ void staffPanel()
     }
 }
 
+// ---- 팀컬러: the team color fit (2026-11-14, owner: "팀컬러를 설정하는것에 따라서 선발 선수들의 스킬과 플레이스타일이
+// 변하도록 하는 치트") -------------------------------------------------------------------------------------------------
+// teamcolor.txt "on / mode / colors / level" (tab separated), read by saka_hooks.c cheats_teamcolor_apply, which also
+// gives the state shown here (saka_teamcolor.h). Names: cheats\teamcolors.txt (tools/make_teamcolors.py).
+struct TeamColorName { std::string ko, ja, kind; bool unused = false; int orig = 0; };
+std::map<int, TeamColorName> g_teamColors;
+void loadTeamColors()
+{
+    static bool done = false;
+    if (done)
+        return;
+    done = true;
+    for (const std::string& line : readLines("cheats\\teamcolors.txt")) {
+        std::vector<std::string> f = split(line, '\t');
+        for (std::string& x : f)
+            while (!x.empty() && (x.back() == '\r' || x.back() == ' '))
+                x.pop_back();
+        if (f.size() >= 7 && f[0] == "color") {
+            TeamColorName& c = g_teamColors[std::atoi(f[1].c_str())];
+            c.ko = f[2];
+            c.ja = f[3];
+            c.kind = f[4];
+            c.unused = f[5] == "1";
+            c.orig = std::atoi(f[6].c_str());
+        }
+    }
+}
+std::string teamColorLabel(int id, bool japanese = true)
+{
+    if (id <= 0)
+        return "(없음)";
+    auto it = g_teamColors.find(id);
+    if (it == g_teamColors.end())
+        return "팀컬러 " + std::to_string(id);
+    return japanese ? it->second.ko + " (" + it->second.ja + ")" : it->second.ko;
+}
+struct TeamColorCfg { bool on = false; int mode = 0; int pick[3] = {0, 0, 0}; int level = 7; bool upper = true; };
+TeamColorCfg loadTeamColorCfg()
+{
+    TeamColorCfg c;
+    for (const std::string& l : readLines(profileFile("teamcolor.txt").c_str())) {
+        std::vector<std::string> f = split(l, '\t');
+        if (f.size() >= 2 && f[0] == "on")
+            c.on = std::atoi(f[1].c_str()) != 0;
+        else if (f.size() >= 2 && f[0] == "mode")
+            c.mode = std::atoi(f[1].c_str()) == 1 ? 1 : 0;
+        else if (f.size() >= 2 && f[0] == "level")
+            c.level = std::max(1, std::min(7, std::atoi(f[1].c_str())));
+        else if (f.size() >= 2 && f[0] == "upper")
+            c.upper = std::atoi(f[1].c_str()) != 0;
+        else if (f.size() >= 2 && f[0] == "colors")
+            for (size_t k = 0; k < 3 && k + 1 < f.size(); k++)
+                c.pick[k] = std::max(0, std::min(70, std::atoi(f[k + 1].c_str())));
+    }
+    return c;
+}
+void saveTeamColorCfg(const TeamColorCfg& c)
+{
+    writeLines(profileFile("teamcolor.txt").c_str(),
+               {std::string("on\t") + (c.on ? "1" : "0"), "mode\t" + std::to_string(c.mode),
+                "colors\t" + std::to_string(c.pick[0]) + "\t" + std::to_string(c.pick[1]) + "\t" + std::to_string(c.pick[2]),
+                "level\t" + std::to_string(c.level), std::string("upper\t") + (c.upper ? "1" : "0")});
+}
+std::string styleKo(int id)
+{
+    auto it = g_text.styleInfo.find(id);
+    if (it == g_text.styleInfo.end())
+        return id ? "스타일 " + std::to_string(id) : "(없음)";
+    return it->second.ko + std::string(it->second.tier == 3 ? " ★★★" : it->second.tier == 2 ? " ★★" : " ★");
+}
+void teamColorPanel()
+{
+    loadTexts();
+    loadTeamColors();
+    static const char* const axis[5] = {"수비적⇔공격적", "중앙⇔사이드", "점유율⇔속공", "후퇴 수비⇔프레스", "커버⇔플랫"};
+    saka_tc_status st;
+    saka_teamcolor_status(&st);
+    TeamColorCfg cfg = loadTeamColorCfg();
+    note("게임은 팀컬러를 저장하지 않고 그때그때 계산합니다: 선발 11명의 플레이스타일·포지션으로 정해지는 라인 팀컬러 (FW·MF·DF), 작전의 "
+         "전술 값 5개로 정해지는 팀컬러 (짧은 카운터·측면강화·ALL 등), 선수 방침으로 정해지는 팀컬러 중 조건이 맞는 것에서 강한 순서로 "
+         "3개. 레벨은 함께 뽑힌 팀컬러끼리의 조합 보너스로 오릅니다 (최대 Lv.3). 이 치트는 선발 선수의 플레이스타일과 그 스타일의 스킬 "
+         "(필요하면 키 플레이어(KEY)의 오리지널 스킬)만 바꿔서 팀컬러를 맞춥니다. 전술 값과 선수 방침은 바꾸지 않습니다. 게임 데이터에 "
+         "들어 있지만 게임이 막아 둔 상위 팀컬러 18개 (철벽의 측면강화·MF, 티키타카 등)도 '상위 팀컬러 사용'을 켜면 우리 구단에 한해 "
+         "쓸 수 있습니다. 끄거나, 선수가 "
+         "선발에서 빠지면 원래 스타일·스킬로 돌아갑니다. 켜져 있는 동안 바뀐 선발의 그 스타일 칸은 고정됩니다 (선수 탭의 스타일 편집보다 "
+         "우선).");
+    bool changed = false;
+    changed |= ImGui::Checkbox("팀컬러 맞춤 켜기", &cfg.on);
+    ImGui::SameLine();
+    changed |= ImGui::RadioButton("자동 (지금 전술·선발로 레벨이 가장 높은 조합)", &cfg.mode, 0);
+    ImGui::SameLine();
+    changed |= ImGui::RadioButton("지정", &cfg.mode, 1);
+    ImGui::SetNextItemWidth(Px(160));
+    changed |= ImGui::SliderInt("바뀐 스타일의 스킬 레벨 (7 = 최고)", &cfg.level, 1, 7);
+    ImGui::SameLine();
+    changed |= ImGui::Checkbox("상위 팀컬러 사용 (게임이 막아 둔 18개)", &cfg.upper);
+    if (cfg.mode == 1) {
+        for (int k = 0; k < 3; k++) {
+            ImGui::PushID(k);
+            ImGui::SetNextItemWidth(Px(420));
+            if (ImGui::BeginCombo(("팀컬러 " + std::to_string(k + 1)).c_str(), teamColorLabel(cfg.pick[k]).c_str())) {
+                if (ImGui::Selectable("(없음)", cfg.pick[k] == 0)) {
+                    cfg.pick[k] = 0;
+                    changed = true;
+                }
+                for (const auto& kv : g_teamColors) {
+                    const TeamColorName& c = kv.second;
+                    const std::string label = teamColorLabel(kv.first) + (c.kind == "line" ? "  · 라인" : c.kind == "tactics" ? "  · 전술 값" : "  · 선수 방침") +
+                                              (c.unused ? (cfg.upper ? "  [상위]" : "  [상위: '상위 팀컬러 사용'이 꺼져 있어 뽑히지 않음]") : "") + "##c" +
+                                              std::to_string(kv.first);
+                    if (ImGui::Selectable(label.c_str(), cfg.pick[k] == kv.first)) {
+                        cfg.pick[k] = kv.first;
+                        changed = true;
+                    }
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::PopID();
+        }
+    }
+    if (changed) {
+        saveTeamColorCfg(cfg);
+        toast(std::string("팀컬러 맞춤: ") + (cfg.on ? (cfg.mode ? "켬 (지정)" : "켬 (자동)") : "끔 (선수들의 원래 스타일·스킬로)"));
+    }
+    ImGui::Separator();
+    if (!st.loaded) {
+        ImGui::TextDisabled("게임 데이터가 아직 없습니다 (세이브를 불러온 뒤).");
+        return;
+    }
+    auto three = [&](const uint32_t* ids, const uint8_t* lv) {
+        std::string s;
+        for (int k = 0; k < 3; k++)
+            if (ids[k])
+                s += (s.empty() ? "" : "  ·  ") + teamColorLabel((int)ids[k], false) + " Lv." + std::to_string(lv[k]);
+        return s.empty() ? std::string("(없음)") : s;
+    };
+    ImGui::Text("지금 팀컬러: %s", three(st.active, st.active_level).c_str());
+    if (st.on)
+        ImGui::TextDisabled("선수들의 원래 스타일이면: %s", three(st.plain, st.plain_level).c_str());
+    {
+        std::string t = "전술 값 (작전 화면, 5단계):";
+        for (int k = 0; k < 5; k++)
+            t += std::string("  ") + axis[k] + " " + std::to_string(st.tac[k] + 1);
+        ImGui::TextDisabled("%s", t.c_str());
+    }
+    if (!st.on)
+        return;
+    ImGui::SeparatorText("맞추는 팀컬러");
+    if (st.ntarget == 0)
+        note(st.mode == 0 ? "지금 전술 값과 선발로는 스타일을 바꿔서 레벨이 더 오르는 조합이 없습니다. 작전의 전술 값이나 포메이션 (포지션 "
+                            "구성)을 바꾸면 달라집니다."
+                          : "팀컬러를 고르세요.");
+    for (int k = 0; k < st.ntarget && k < 3; k++) {
+        const int c = (int)st.target[k];
+        std::string why;
+        switch (st.target_state[k]) {
+        case 0: why = "맞춤"; break;
+        case 1: why = "선발에 이 팀컬러가 요구하는 포지션의 선수가 모자람 (포메이션에 그 포지션이 없거나, 고른 다른 팀컬러가 그 선수를 씀)"; break;
+        case 2: {
+            why = "전술 값이 맞지 않음 (작전에서 직접 바꿔야 함):";
+            for (int a = 0; a < 5 && c >= 1 && c <= 70; a++) {
+                const int lo = st.color_tac[c][2 * a], hi = st.color_tac[c][2 * a + 1];
+                if (st.tac[a] < lo || st.tac[a] > hi)
+                    why += std::string("  ") + axis[a] + " " + std::to_string(lo + 1) + "~" + std::to_string(hi + 1) + " 필요 (지금 " + std::to_string(st.tac[a] + 1) + ")";
+            }
+            break;
+        }
+        case 3: why = "선수 방침 조건 (선발 6명 이상)이 맞지 않음. 방침 값은 이 치트가 바꾸지 않음 ('방침 중앙' 치트·선수 편집)"; break;
+        case 4: why = "키 플레이어(KEY)의 오리지널 스킬을 다른 팀컬러가 이미 씀 (한 선수에 하나)"; break;
+        case 5: why = "게임이 막아 둔 상위 팀컬러 ('상위 팀컬러 사용'을 켜면 쓸 수 있음)"; break;
+        default: why = "조건은 맞지만 더 강한 팀컬러 3개가 먼저 뽑힘"; break;
+        }
+        ImGui::TextColored(st.target_state[k] == 0 ? ImVec4(0.6f, 0.9f, 0.6f, 1.0f) : ImVec4(1.0f, 0.6f, 0.3f, 1.0f), "%s: %s",
+                           teamColorLabel(c).c_str(), why.c_str());
+    }
+    ImGui::SeparatorText("바뀐 선발 선수");
+    if (st.nforced == 0 && !st.leader_orig)
+        ImGui::TextDisabled("바뀐 선수 없음.");
+    for (int i = 0; i < st.nforced && i < 12; i++)
+        ImGui::Text("%s:  %s  →  %s", nameOf(g_text.players, (int)st.forced[i].id).c_str(), styleKo((int)st.forced[i].natural).c_str(),
+                    styleKo((int)st.forced[i].style).c_str());
+    if (st.leader_orig) {
+        auto it = g_text.origKo.find((int)st.leader_orig);
+        ImGui::Text("%s (키 플레이어 KEY): 오리지널 스킬 → %s", nameOf(g_text.players, (int)st.leader_id).c_str(),
+                    it != g_text.origKo.end() ? it->second.c_str() : std::to_string(st.leader_orig).c_str());
+    }
+}
+
 void speedBadgeWindow(unsigned w)
 {
     const int sp = g_saka_user_speed;
@@ -2212,9 +2403,13 @@ void speedBadgeWindow(unsigned w)
         ImGui::Text(">> 게임 속도 x%d   (F7 / F8: 끄기)", sp);
     else if ((int)GetTickCount() - g_speedShownAt < 2000)
         ImGui::TextUnformatted("게임 속도 보통");
-    if ((int)GetTickCount() - g_superShownAt < 2500)
-        ImGui::TextUnformatted(g_superArmed ? "슈퍼플레이 대기 (F6): 20초 안에 우리 팀 스킬이 발동할 장면에서 반드시 발동"
-                                            : "슈퍼플레이 (F6): 치트 목록의 '슈퍼플레이 F6' 스위치를 켜야 작동");
+    const int super = saka_superplay_state();   // 2026-11-14: armed until used, so the badge stays while it waits
+    if (super == 1)
+        ImGui::TextUnformatted("슈퍼플레이 대기 (F6): 우리 팀의 다음 플레이에서 스킬 발동");
+    else if (super == 2)
+        ImGui::TextUnformatted("슈퍼플레이 발동!");
+    else if ((int)GetTickCount() - g_superShownAt < 2500 && !g_superArmed)
+        ImGui::TextUnformatted("슈퍼플레이 (F6): 치트 목록의 '슈퍼플레이 F6' 스위치를 켜야 작동");
     ImGui::End();
 }
 
@@ -2364,6 +2559,11 @@ void drawMenu(unsigned w, unsigned h)
             if (ImGui::BeginTabItem("스태프", nullptr, tabFlags(4))) {
                 shownTab = 4;
                 staffPanel();
+                ImGui::EndTabItem();
+            }
+            if (ImGui::BeginTabItem("팀컬러", nullptr, tabFlags(5))) {
+                shownTab = 5;
+                teamColorPanel();
                 ImGui::EndTabItem();
             }
             ImGui::EndTabBar();
@@ -2591,7 +2791,8 @@ void feedInput(unsigned w, unsigned h)
 
 bool speedBadge()
 {
-    return g_saka_user_speed > 1 || (int)GetTickCount() - g_speedShownAt < 2000 || (int)GetTickCount() - g_superShownAt < 2500;
+    return g_saka_user_speed > 1 || (int)GetTickCount() - g_speedShownAt < 2000 || (int)GetTickCount() - g_superShownAt < 2500 ||
+           saka_superplay_state() != 0;
 }
 int overlayOn() { return g_open || speedBadge() ? 1 : 0; }
 

@@ -955,7 +955,7 @@ typedef struct { char name[128]; int first, n, on, once, done; unsigned refresh;
 static cheat_code s_cheat_codes[4096];
 static cheat_def s_cheat_defs[512];
 static int s_ncheat_codes, s_ncheat_defs, s_cheat_skipped;
-static FILETIME s_cheat_time[7];
+static FILETIME s_cheat_time[8];
 
 /* ---- Per-save settings (2026-11-09, owner: "이런 치트들이 세이브 파일별로 별도로 작동하는 메커니즘을 야구츠쿠3의 치트적용
  * 관련해서 참고해"; YKTK3 keeps them in cheat_saves/<save>/) ------------------------------------------------------
@@ -997,7 +997,8 @@ static void cheat_profile_desc(LONG slot, char* out, size_t n)
     else if (slot == -1) snprintf(out, n, "새 게임 (아직 저장 안 함)");
     else snprintf(out, n, "세이브 %ld (MAIN%02ld.DAT)", (long)slot + 1, (long)slot);
 }
-static const char* const s_profile_files[6] = { "enabled.txt", "values.txt", "players.txt", "lists.txt", "training.txt", "staff.txt" };
+static const char* const s_profile_files[8] = { "enabled.txt", "values.txt", "players.txt", "lists.txt", "training.txt", "staff.txt",
+                                                "teamcolor.txt", "teamcolor_backup.txt" };
 static void cheat_profile_copy(LONG from, LONG to, int only_missing)
 {
     char a[64], b[64], fa[96], fb[96];
@@ -1005,7 +1006,7 @@ static void cheat_profile_copy(LONG from, LONG to, int only_missing)
     cheat_profile_dir(to, b, sizeof b);
     CreateDirectoryA("cheats/saves", NULL);
     { char d[64]; snprintf(d, sizeof d, "%s", b); d[strlen(d) - 1] = 0; CreateDirectoryA(d, NULL); }
-    for (int i = 0; i < 6; i++) {
+    for (int i = 0; i < 8; i++) {
         snprintf(fa, sizeof fa, "%s%s", a, s_profile_files[i]);
         snprintf(fb, sizeof fb, "%s%s", b, s_profile_files[i]);
         if (GetFileAttributesA(fa) == INVALID_FILE_ATTRIBUTES) { if (!only_missing) DeleteFileA(fb); continue; }
@@ -1437,13 +1438,15 @@ static void cheats_training_apply(int loaded)
             st_be32(slot + 4, e->course);
             vm_base[slot + 8] = (uint8_t)(w ? (w > 255 ? 255 : w) : 1);
         } else {
+            /* 2026-11-14: the kind is the BYTE at +4 (func_0051A820 / func_0051A9EC store it with stb; +5..+7 stay 0).
+             * It was written as a u32 before, so a 能力覚醒 plan (1) read as 個性強化 (0) in the game's weekly pass. */
             const uint32_t slot = 0x00EE83CCu + 0x20u * e->slot;
-            if (ld_be32(slot) == e->id && ld_be32(slot + 4) == e->sub && ld_be32(slot + 8) == e->course && vm_base[slot + 0xC]) continue;
+            if (ld_be32(slot) == e->id && ld_be32(slot + 4) == (uint32_t)e->sub << 24 && ld_be32(slot + 8) == e->course && vm_base[slot + 0xC]) continue;
             const uint32_t table = e->sub ? 0x00E154A8u : 0x00E17238u;
             const uint32_t w = (vm_base[table + e->course * 0x3Cu + 4u] & 0x7Fu) * 2u;
             memset(vm_base + slot, 0, 0x20);
             st_be32(slot, e->id);
-            st_be32(slot + 4, e->sub);
+            vm_base[slot + 4] = e->sub;
             st_be32(slot + 8, e->course);
             vm_base[slot + 0xC] = (uint8_t)(w ? w : 1);
         }
@@ -1678,8 +1681,9 @@ static void cheat_profile_tick(void)
         else if (loaded && differs) {                                                                 /* a new game */
             slot = -1;
             InterlockedExchange(&s_save_title, 0);
-            for (int i = 0; i < 4; i++) {
+            for (int i = 0; i < 8; i++) {   /* a new game starts without the last new game's settings (4, 5 stay: as before) */
                 char f[96];
+                if (i == 4 || i == 5) continue;
                 snprintf(f, sizeof f, "cheats/saves/new/%s", s_profile_files[i]);
                 DeleteFileA(f);
             }
@@ -1737,6 +1741,599 @@ static int cheat_file_changed(const char* path, FILETIME* last)
     return 1;
 }
 
+/* ---- TEAM COLOR FIT (2026-11-14, owner: "팀컬러를 설정하는것에 따라서 선발 선수들의 스킬과 플레이스타일이 변하도록 하는
+ * 치트"; REA Ghidra re/decomp_all.c + the EBOOT's tables) ---------------------------------------------------------------
+ * The game works the club's team colors out each time (func_00580434(out[3], club); nothing is saved):
+ *   the 70 colors are tried in the order of the list 0x00E54E70 (0x47 ids, sorted at boot by the master's key, high
+ *   first; func_00580BAC), and the first three that hold are the club's. Master 0x008D60A4 + id x 0x4C:
+ *     +0 u16 key, +2 u16 bit 0 = not used by the game (18 "upper" colors), +4 five (u32 style group, u32 position
+ *     group) pairs (group 0x3D = none): each needs its own starter whose style in use is in the group (0x008D5164 +
+ *     group x 0x40: 16 style ids) and whose position (record +8, 0-10) is in the position group's mask (0x00EE1E90 +
+ *     group x 4, 27 masks set at boot by func_00580C80: 1-11 one position each, 12 wings, 13 side MF, 14 SB, 15 wings
+ *     + FW, 16 DM / side MF / OM, 17 side MF + OM, 18 DM + side MF, 19 DM + OM, 20 SB + CB); +0x2C five (min, max) bytes for the formation's five tactic values (block +0x5C, 0-4
+ *     each: defensive/attacking, centre/side, possession/fast, retreat/press, cover/flat); +0x36 (min, max) for the
+ *     starters' policy +0xE4 / 0x3334, +0x38 for +0xE6, +0x3A how many starters must be inside both; +0x3C an original
+ *     skill the KEY player (the first of role list 5, lineup +0x30A4 + 5 x 0x5C; list 0 is the captain: func_002D617C
+ *     and func_002D6204 ask the same lists for the captain's and the key player's skills) must have in his style slot;
+ *     +0x40 an extra
+ *     condition (func_00580188; type 0 = none in every row).
+ *   Levels: each color starts at 1; a row of table 100 (109 x 0x10: three color ids, +0xC a bonus) whose colors are all
+ *   among the three adds its bonus to those colors; 4 and more become 3 (func_00593300). The level picks the row of
+ *   table 99 (211 x 0x34) with the color's effect.
+ * So the colors the owner "sets" with the game plan (48-62 need only tactic values) stay at level 1 until colors of
+ * the lines (1-47, by play style and position) stand beside them. The cheat makes that happen by changing only the
+ * starters' play styles and skills (and the KEY player's original skill where a color asks for one):
+ *   자동 (mode 0): of every set of up to three line colors that can be had with the tactics as they are, the one that
+ *     gives the highest levels (then keeps most of the colors the club has without the cheat, then changes fewest);
+ *   지정 (mode 1): the colors picked in F2; what the cheat cannot give them (tactic values, policies, a color the
+ *     game does not use) is shown there.
+ * A changed player gets the style (the group's highest tier; of those the family his own style or his position is
+ * nearest to) and that style's skill types (style master 0x00E12B08 + style x 0x3C, +0x10) at the chosen level.
+ * Tactic values and policies are never written (the game plan is the owner's; '방침 중앙' holds the policies).
+ * Off, a player leaving the eleven, or another plan: his slot goes back to what it was when the cheat first changed it
+ * (teamcolor_backup.txt in the save's settings keeps it over a restart); a slot whose style is no longer the cheat's
+ * (the game, another edit or another save put one there) is left alone. While a starter is changed his slot is held:
+ * what the game or a players.txt style edit writes into it is written over (this runs after them).
+ * The 18 "upper" colors (2026-11-14, owner: "팀컬러는 상위팀컬러까지 사용가능하도록"): their rows are all there (needs,
+ * three level rows in table 99, bonus rows in table 100, names); only the master's bit keeps func_00580434 from
+ * trying them, and nothing else reads it. With 'upper' on (the default) the game's own test passes them for the
+ * user's club (saka_teamcolor_upper_hook at that test: r25 = the club object, the canonical one or a match copy;
+ * other clubs keep the game's rule), and the plans here count them the same way. Off, or the cheat off: as shipped.
+ * teamcolor.txt: "on 0|1", "mode 0|1", "colors a b c", "level 1-7", "upper 0|1" (tab separated; the F2 팀컬러 tab
+ * writes it). */
+#include "saka_teamcolor.h"
+#define TC_CLUB    0x00EE2934u
+#define TC_MASTER  0x008D60A4u
+#define TC_ORDER   0x00E54E70u
+#define TC_GROUPS  0x008D5164u
+#define TC_POSMASK 0x00EE1E90u
+#define TC_STYLES  0x00E12B08u
+
+typedef struct {
+    uint32_t rec[11], id[11], style[11], natural[11];
+    uint8_t valid[11], pos[11], e4[11], e6[11], tac[5];
+    uint32_t leader_rec, leader_id, leader_orig, leader_natural;
+} tc_team;
+typedef struct { uint32_t id; uint8_t slot; uint8_t natural[0x30], forced[0x30]; } tc_backup;
+
+static struct { int on, mode; uint32_t pick[3], level; int upper; } s_tc_cfg = { 0, 0, { 0, 0, 0 }, 7, 1 };
+static tc_backup s_tc_backup[24];
+static int s_tc_nbackup;
+static saka_tc_status s_tc_status;
+static CRITICAL_SECTION s_tc_lock;
+static volatile LONG s_tc_lock_ready;
+static uint32_t s_tc_plan_sig;
+static uint32_t s_tc_plan_style[11], s_tc_plan_ids[11], s_tc_plan_leader, s_tc_plan_leader_id;
+static uint32_t s_tc_plan_target[3];
+static uint8_t s_tc_plan_state[3];
+static int s_tc_plan_ntarget;
+
+static uint32_t tc_be16(uint32_t ea) { return (uint32_t)vm_base[ea] << 8 | vm_base[ea + 1]; }
+static uint32_t tc_be32(const uint8_t* p) { return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3]; }
+static int tc_player_ok(uint32_t id) { return id != 0 && (id < 0x46A2u || (id >= 0x7FFBu && id <= 0x7FFFu)); }
+/* 1 = the game does not try this color for the user's club now: its master bit, unless 'upper' lifts it. */
+static int tc_unused(uint32_t c) { return (tc_be16(TC_MASTER + c * 0x4Cu + 2u) & 1u) && !(s_tc_cfg.on && s_tc_cfg.upper); }
+int saka_teamcolor_upper_hook(uint32_t club)   /* func_00580434's "not used" test; 1 = try the color all the same */
+{
+    if (!s_tc_cfg.on || !s_tc_cfg.upper || club < 0x10000u) return 0;
+    if (club == TC_CLUB) return 1;
+    const uint32_t id = ld_be32(club);   /* a match copy of the user's club: +0 is the club, as match_team_is_user tests it */
+    return id != 0 && (id == 0x100u || id == ld_be32(0x00EE28ACu));
+}
+static uint32_t tc_slot_of(uint32_t rec) { const uint32_t s = vm_base[rec + 0x10Au]; return rec + 0x10Cu + 0x30u * (s < 5u ? s : 0u); }
+static tc_backup* tc_backup_of(uint32_t id)
+{
+    for (int i = 0; i < s_tc_nbackup; i++)
+        if (s_tc_backup[i].id == id) return &s_tc_backup[i];
+    return NULL;
+}
+static void tc_backup_drop(tc_backup* b) { *b = s_tc_backup[--s_tc_nbackup]; }
+/* The slot still holds what the cheat put there (the game may have moved its skills on): style and original skill. */
+static int tc_block_mine(const uint8_t* blk, const tc_backup* b) { return memcmp(blk, b->forced, 8) == 0; }
+/* The player's own style block: the kept one while the cheat holds his slot. */
+static const uint8_t* tc_natural_block(uint32_t rec)
+{
+    const tc_backup* b = tc_backup_of(ld_be32(rec));
+    if (b && b->slot == vm_base[rec + 0x10Au]) return b->natural;
+    return vm_base + tc_slot_of(rec);
+}
+static int tc_tables_ok(void)
+{
+    const uint32_t h100 = ld_be32(0x008D4A9Cu + 4u * 100u);
+    return cheat_committed(TC_MASTER, 71u * 0x4Cu) && cheat_committed(TC_ORDER, 0x47u * 4u) && cheat_committed(TC_GROUPS, 61u * 0x40u) &&
+           cheat_committed(TC_POSMASK, 27u * 4u) && cheat_committed(TC_STYLES, 67u * 0x3Cu) && cheat_committed(h100, 8u) &&
+           ld_be32(h100) == 109u && cheat_committed(ld_be32(h100 + 4u), 109u * 0x10u) && cheat_committed(TC_CLUB, 0x3B64u) &&
+           ld_be32(TC_POSMASK + 4u * 11u) != 0;   /* the position masks are set (boot is past) */
+}
+/* The eleven, the tactic values and the KEY player, as the game reads them; styles = the players' own. */
+static int tc_read(tc_team* t)
+{
+    memset(t, 0, sizeof *t);
+    const uint32_t set = ld_be32(TC_CLUB + 0x3B60u);
+    if (set > 1u) return 0;
+    const uint32_t lineup = TC_CLUB + set * 0x58Cu;
+    if (vm_base[lineup + 0x347Cu] > 2u) return 0;
+    const uint32_t form = lineup + vm_base[lineup + 0x347Cu] * 0x90u + 0x32CCu;
+    int n = 0;
+    for (uint32_t i = 0; i < 11u; i++) {
+        const uint32_t ri = ld_be32(lineup + 0x3048u + 4u * i);
+        if (ri >= 23u) continue;
+        const uint32_t rec = CHEAT_ROSTER + ri * CHEAT_RECORD, id = ld_be32(rec);
+        if (!tc_player_ok(id)) continue;
+        t->rec[i] = rec; t->id[i] = id; t->valid[i] = 1;
+        t->pos[i] = (uint8_t)(ld_be32(rec + 8u) < 11u ? ld_be32(rec + 8u) : 11u);
+        t->natural[i] = t->style[i] = tc_be32(tc_natural_block(rec));
+        t->e4[i] = (uint8_t)(tc_be16(rec + 0xE4u) / 0x3334u);
+        t->e6[i] = (uint8_t)(tc_be16(rec + 0xE6u) / 0x3334u);
+        n++;
+    }
+    for (uint32_t k = 0; k < 5u; k++) t->tac[k] = vm_base[form + 0x5Cu + k];
+    const uint32_t li = ld_be32(lineup + 0x30A4u + 5u * 0x5Cu);
+    if (li < 23u && tc_player_ok(ld_be32(CHEAT_ROSTER + li * CHEAT_RECORD))) {
+        t->leader_rec = CHEAT_ROSTER + li * CHEAT_RECORD;
+        t->leader_id = ld_be32(t->leader_rec);
+        t->leader_natural = t->leader_orig = tc_be32(tc_natural_block(t->leader_rec) + 4);
+    }
+    return n;
+}
+static int tc_in_group(uint32_t g, uint32_t style)
+{
+    if (!style || g > 60u) return 0;
+    for (uint32_t i = 0; i < 16u; i++)
+        if (ld_be32(TC_GROUPS + g * 0x40u + 4u * i) == style) return 1;
+    return 0;
+}
+static int tc_pos_ok(uint32_t pg, uint32_t pos) { return pg < 27u && pos < 11u && ((ld_be32(TC_POSMASK + 4u * pg) >> pos) & 1u); }
+static int tc_reqs(uint32_t c, uint32_t* g, uint32_t* p)
+{
+    int n = 0;
+    for (uint32_t k = 0; k < 5u; k++) {
+        const uint32_t gk = ld_be32(TC_MASTER + c * 0x4Cu + 4u + 8u * k);
+        if (gk == 0x3Du) continue;
+        g[n] = gk; p[n] = ld_be32(TC_MASTER + c * 0x4Cu + 8u + 8u * k); n++;
+    }
+    return n;
+}
+static int tc_match(const tc_team* t, const uint32_t* g, const uint32_t* p, int n, int k, uint32_t used)
+{
+    if (k == n) return 1;
+    for (int i = 0; i < 11; i++) {
+        if (((used >> i) & 1u) || !t->valid[i] || !tc_pos_ok(p[k], t->pos[i]) || !tc_in_group(g[k], t->style[i])) continue;
+        if (tc_match(t, g, p, n, k + 1, used | 1u << i)) return 1;
+    }
+    return 0;
+}
+/* 0 = the color holds; else why not (saka_tc_status target_state 1-5). */
+static int tc_why_not(const tc_team* t, uint32_t c)
+{
+    const uint32_t r = TC_MASTER + c * 0x4Cu;
+    uint32_t g[5], p[5];
+    if (c < 1u || c > 70u || tc_unused(c) || ld_be32(r + 0x40u) != 0) return 5;
+    const int n = tc_reqs(c, g, p);
+    if (n && !tc_match(t, g, p, n, 0, 0)) return 1;
+    for (uint32_t k = 0; k < 5u; k++)
+        if (t->tac[k] < vm_base[r + 0x2Cu + 2u * k] || t->tac[k] > vm_base[r + 0x2Du + 2u * k]) return 2;
+    uint32_t cnt = 0;
+    for (int i = 0; i < 11; i++)
+        cnt += t->valid[i] && t->e4[i] >= vm_base[r + 0x36u] && t->e4[i] <= vm_base[r + 0x37u] && t->e6[i] >= vm_base[r + 0x38u] &&
+               t->e6[i] <= vm_base[r + 0x39u];
+    if (cnt < vm_base[r + 0x3Au]) return 3;
+    const uint32_t cap = ld_be32(r + 0x3Cu);
+    if (cap && t->leader_orig != cap) return 4;
+    return 0;
+}
+/* The club's three colors and their levels for t, as func_00580434 works them out; returns the levels' sum. */
+static int tc_eval(const tc_team* t, uint32_t active[3], uint8_t level[3])
+{
+    int n = 0;
+    active[0] = active[1] = active[2] = 0;
+    for (uint32_t i = 0; i < 0x47u && n < 3; i++) {
+        const uint32_t c = ld_be32(TC_ORDER + 4u * i);
+        if (c && c <= 70u && !tc_why_not(t, c)) active[n++] = c;
+    }
+    for (int k = 0; k < 3; k++) level[k] = active[k] ? 1 : 0;
+    const uint32_t combos = ld_be32(ld_be32(0x008D4A9Cu + 4u * 100u) + 4u);
+    for (uint32_t i = 0; i < 109u; i++) {
+        const uint32_t r = combos + i * 0x10u;
+        uint8_t add[3] = { 0, 0, 0 };
+        int need = 0, hit = 0;
+        for (uint32_t j = 0; j < 3u; j++) {
+            const uint32_t c = ld_be32(r + 4u * j);
+            need += c != 0;
+            for (int k = 0; k < 3; k++)
+                if (c == active[k] && active[k]) { hit++; add[k] = (uint8_t)(add[k] + vm_base[r + 0xCu]); }
+        }
+        if (hit == need)
+            for (int k = 0; k < 3; k++) level[k] = (uint8_t)(level[k] + add[k]);
+    }
+    int sum = 0;
+    for (int k = 0; k < 3; k++) { if (level[k] >= 4) level[k] = 3; sum += level[k]; }
+    return sum;
+}
+/* The style a starter gets for a group: the highest tier; of those his own style's family, then a family his position
+ * usually has, then the first. */
+static uint32_t tc_pick_style(uint32_t g, uint32_t pos, uint32_t own)
+{
+    static const uint8_t fam_of_pos[11][3] = { {14, 15, 0}, {11, 10, 0}, {11, 10, 0}, {12, 13, 0}, {9, 8, 7}, {10, 4, 5},
+                                               {10, 4, 5}, {6, 7, 8}, {4, 5, 0}, {4, 5, 0}, {2, 1, 3} };
+    const uint32_t own_fam = own && own < 67u ? ld_be32(TC_STYLES + own * 0x3Cu + 4u) : 0;
+    uint32_t best = 0;
+    int best_score = -1;
+    if (g > 60u) return 0;
+    for (uint32_t i = 0; i < 16u; i++) {
+        const uint32_t s = ld_be32(TC_GROUPS + g * 0x40u + 4u * i);
+        if (!s || s >= 67u) continue;
+        const uint32_t fam = ld_be32(TC_STYLES + s * 0x3Cu + 4u), tier = ld_be32(TC_STYLES + s * 0x3Cu + 8u);
+        int score = (int)(tier > 3u ? 3u : tier) * 10;
+        if (fam == own_fam) score += 5;
+        for (int j = 0; j < 3 && pos < 11u; j++)
+            if (fam_of_pos[pos][j] == fam) { score += 3 - j; break; }
+        if (score > best_score) { best_score = score; best = s; }
+    }
+    return best;
+}
+/* One color's needs onto the eleven with the fewest new styles; pinned starters keep the style they have in t. */
+static int tc_fit_best(const tc_team* t, const uint8_t* pinned, const uint32_t* g, const uint32_t* p, int n, int k, uint32_t used, int cost,
+                       int* best_cost, int8_t* pick, int8_t* best_pick)
+{
+    if (cost >= *best_cost) return 0;
+    if (k == n) { *best_cost = cost; memcpy(best_pick, pick, 5); return 1; }
+    int found = 0;
+    for (int pass = 0; pass < 2; pass++)   /* first the starters who need no change */
+        for (int i = 0; i < 11; i++) {
+            if (((used >> i) & 1u) || !t->valid[i] || !tc_pos_ok(p[k], t->pos[i])) continue;
+            const int fits = tc_in_group(g[k], t->style[i]);
+            if (pass == 0 ? !fits : (fits || pinned[i])) continue;
+            pick[k] = (int8_t)i;
+            found |= tc_fit_best(t, pinned, g, p, n, k + 1, used | 1u << i, cost + pass, best_cost, pick, best_pick);
+        }
+    return found;
+}
+/* Fits the colors, in this order, onto t (styles and the KEY player's skill): state[] per color as target_state;
+ * returns the number of starters whose style changed. */
+static int tc_plan(tc_team* t, const uint32_t* colors, int ncolors, uint8_t* state)
+{
+    uint8_t pinned[11];
+    int forced = 0, leader_set = 0;
+    memset(pinned, 0, sizeof pinned);
+    for (int ci = 0; ci < ncolors; ci++) {
+        const uint32_t c = colors[ci], r = TC_MASTER + c * 0x4Cu;
+        uint32_t g[5], p[5];
+        state[ci] = 0;
+        if (c < 1u || c > 70u || tc_unused(c)) { state[ci] = 5; continue; }
+        const int n = tc_reqs(c, g, p);
+        const uint32_t cap = ld_be32(r + 0x3Cu);
+        if (cap && (!t->leader_rec || (leader_set && t->leader_orig != cap))) { state[ci] = 4; continue; }
+        if (n) {
+            int best = 99;
+            int8_t pick[5] = { -1, -1, -1, -1, -1 }, best_pick[5] = { -1, -1, -1, -1, -1 };
+            if (!tc_fit_best(t, pinned, g, p, n, 0, 0, 0, &best, pick, best_pick)) { state[ci] = 1; continue; }
+            for (int k = 0; k < n; k++) {
+                const int i = best_pick[k];
+                if (!tc_in_group(g[k], t->style[i])) { t->style[i] = tc_pick_style(g[k], t->pos[i], t->natural[i]); forced++; }
+                pinned[i] = 1;
+            }
+        }
+        if (cap) { t->leader_orig = cap; leader_set = 1; }
+    }
+    return forced;
+}
+/* The order of the colors that fits most of them (then changes fewest): out = that order, t = base with the plan. */
+static int tc_plan_best(const tc_team* base, const uint32_t* set, int n, uint32_t* out, tc_team* t, uint8_t* state, int* forced)
+{
+    static const uint8_t perm[6][3] = { {0, 1, 2}, {0, 2, 1}, {1, 0, 2}, {1, 2, 0}, {2, 0, 1}, {2, 1, 0} };
+    const int nperm = n <= 1 ? 1 : n == 2 ? 2 : 6;
+    int best_fit = -1, best_forced = 0;
+    for (int pi = 0; pi < nperm; pi++) {
+        uint32_t order[3] = { 0, 0, 0 };
+        uint8_t st[3] = { 0, 0, 0 };
+        int k = 0;
+        if (n == 2) { order[0] = set[pi]; order[1] = set[1 - pi]; k = 2; }
+        else
+            for (; k < n; k++) order[k] = set[perm[pi][k]];
+        tc_team cand = *base;
+        const int f = tc_plan(&cand, order, n, st);
+        int fit = 0;
+        for (int j = 0; j < n; j++) fit += st[j] == 0;
+        if (fit > best_fit || (fit == best_fit && f < best_forced)) {
+            best_fit = fit; best_forced = f;
+            *t = cand;
+            memcpy(out, order, sizeof order); memcpy(state, st, 3);
+            if (fit == n) break;
+        }
+    }
+    *forced = best_forced;
+    return best_fit;
+}
+static void tc_load_config(void)
+{
+    s_tc_cfg.on = 0; s_tc_cfg.mode = 0; s_tc_cfg.level = 7; s_tc_cfg.upper = 1;
+    s_tc_cfg.pick[0] = s_tc_cfg.pick[1] = s_tc_cfg.pick[2] = 0;
+    FILE* f = fopen(cheat_path("teamcolor.txt"), "rb");
+    if (!f) return;
+    char line[128];
+    while (fgets(line, sizeof line, f)) {
+        unsigned a = 0, b = 0, c = 0;
+        cheat_trim(line);
+        const char* s = cheat_skip_space(line);
+        if (sscanf(s, "on\t%u", &a) == 1) s_tc_cfg.on = a != 0;
+        else if (sscanf(s, "mode\t%u", &a) == 1) s_tc_cfg.mode = a == 1;
+        else if (sscanf(s, "level\t%u", &a) == 1) s_tc_cfg.level = a < 1u ? 1u : a > 7u ? 7u : a;
+        else if (sscanf(s, "upper\t%u", &a) == 1) s_tc_cfg.upper = a != 0;
+        else if (sscanf(s, "colors\t%u\t%u\t%u", &a, &b, &c) >= 1) {
+            s_tc_cfg.pick[0] = a <= 70u ? a : 0; s_tc_cfg.pick[1] = b <= 70u ? b : 0; s_tc_cfg.pick[2] = c <= 70u ? c : 0;
+        }
+    }
+    fclose(f);
+}
+static void tc_save_backups(void)
+{
+    const char* path = cheat_path("teamcolor_backup.txt");
+    if (!s_tc_nbackup) { DeleteFileA(path); return; }
+    FILE* f = fopen(path, "wb");
+    if (!f) return;
+    for (int i = 0; i < s_tc_nbackup; i++) {
+        const tc_backup* b = &s_tc_backup[i];
+        fprintf(f, "%u\t%u\t", b->id, b->slot);
+        for (int k = 0; k < 0x30; k++) fprintf(f, "%02X", b->natural[k]);
+        fputc('\t', f);
+        for (int k = 0; k < 0x30; k++) fprintf(f, "%02X", b->forced[k]);
+        fputc('\n', f);
+    }
+    fclose(f);
+}
+static void tc_load_backups(void)
+{
+    s_tc_nbackup = 0;
+    s_tc_plan_sig = 0;
+    FILE* f = fopen(cheat_path("teamcolor_backup.txt"), "rb");
+    if (!f) return;
+    char line[320];
+    while (fgets(line, sizeof line, f) && s_tc_nbackup < 24) {
+        unsigned id, slot;
+        char a[0x61], b[0x61];
+        if (sscanf(line, "%u\t%u\t%96[0-9A-Fa-f]\t%96[0-9A-Fa-f]", &id, &slot, a, b) != 4 || strlen(a) != 0x60 || strlen(b) != 0x60 || slot > 4u) continue;
+        tc_backup* e = &s_tc_backup[s_tc_nbackup++];
+        e->id = id; e->slot = (uint8_t)slot;
+        for (int k = 0; k < 0x30; k++) {
+            unsigned x = 0, y = 0;
+            sscanf(a + 2 * k, "%2x", &x); sscanf(b + 2 * k, "%2x", &y);
+            e->natural[k] = (uint8_t)x; e->forced[k] = (uint8_t)y;
+        }
+    }
+    fclose(f);
+}
+/* The block a player's slot holds while his style is the cheat's: his own block with the style, its skills, and the
+ * original skill (0 = each as it is). */
+static void tc_make_block(uint8_t* out, const uint8_t* natural, uint32_t style, uint32_t orig, uint32_t level)
+{
+    memcpy(out, natural, 0x30);
+    if (style && style < 67u && style != tc_be32(natural)) {
+        out[0] = out[1] = out[2] = 0; out[3] = (uint8_t)style;
+        for (uint32_t k = 0; k < 5u; k++) {
+            const uint32_t type = ld_be32(TC_STYLES + style * 0x3Cu + 0x10u + 4u * k);
+            uint8_t* e = out + 8 + 8 * k;
+            memset(e, 0, 8);
+            if (type >= 1u && type <= 16u) { e[3] = (uint8_t)type; e[4] = (uint8_t)level; }
+            else e[4] = 0xFF;
+        }
+    }
+    if (orig) { out[4] = out[5] = 0; out[6] = (uint8_t)(orig >> 8); out[7] = (uint8_t)orig; }
+}
+/* Puts a player's slot to style / orig (0, 0 = his own again). 1 = the kept blocks changed (the file is written). */
+static int tc_set_player(uint32_t rec, uint32_t style, uint32_t orig)
+{
+    const uint32_t id = ld_be32(rec);
+    const uint8_t slot = vm_base[rec + 0x10Au] < 5u ? vm_base[rec + 0x10Au] : 0;
+    uint8_t* cur = vm_base + rec + 0x10Cu + 0x30u * slot;
+    tc_backup* b = tc_backup_of(id);
+    int changed = 0;
+    if (b && b->slot != slot) {   /* he uses another slot now: the old one gets its own block back */
+        uint8_t* old = vm_base + rec + 0x10Cu + 0x30u * b->slot;
+        if (tc_block_mine(old, b)) memcpy(old, b->natural, 0x30);
+        tc_backup_drop(b); b = NULL; changed = 1;
+    }
+    if (!style && !orig) {
+        if (!b) return changed;
+        if (tc_block_mine(cur, b)) memcpy(cur, b->natural, 0x30);
+        tc_backup_drop(b);
+        return 1;
+    }
+    uint8_t want[0x30];
+    tc_make_block(want, b ? b->natural : cur, style, orig, s_tc_cfg.level);
+    if (!b) {
+        if (memcmp(want, cur, 0x30) == 0 || s_tc_nbackup >= 24) return changed;   /* nothing to change */
+        b = &s_tc_backup[s_tc_nbackup++];
+        b->id = id; b->slot = slot;
+        memcpy(b->natural, cur, 0x30); memcpy(b->forced, want, 0x30);
+        memcpy(cur, want, 0x30);
+        return 1;
+    }
+    if (memcmp(want, b->natural, 0x30) == 0) {   /* the plan asks nothing of him any more */
+        if (tc_block_mine(cur, b)) memcpy(cur, b->natural, 0x30);
+        tc_backup_drop(b);
+        return 1;
+    }
+    if (memcmp(b->forced, want, 0x30) != 0) { memcpy(b->forced, want, 0x30); changed = 1; }
+    if (memcmp(cur, want, 0x30) != 0) memcpy(cur, want, 0x30);
+    return changed;
+}
+static uint32_t tc_sig(const tc_team* t)
+{
+    uint32_t h = 2166136261u;
+#define TC_MIX(v) h = (h ^ (uint32_t)(v)) * 16777619u
+    for (int i = 0; i < 11; i++) { TC_MIX(t->id[i]); TC_MIX(t->natural[i]); TC_MIX(t->pos[i] | t->e4[i] << 8 | t->e6[i] << 16 | t->valid[i] << 24); }
+    for (int k = 0; k < 5; k++) TC_MIX(t->tac[k]);
+    TC_MIX(t->leader_id); TC_MIX(t->leader_natural);
+    TC_MIX(s_tc_cfg.on | s_tc_cfg.mode << 1 | s_tc_cfg.upper << 2); TC_MIX(s_tc_cfg.pick[0]); TC_MIX(s_tc_cfg.pick[1]); TC_MIX(s_tc_cfg.pick[2]);
+#undef TC_MIX
+    return h ? h : 1u;
+}
+static long tc_score(const tc_team* t, const uint32_t plain[3], int forced)
+{
+    uint32_t act[3];
+    uint8_t lev[3];
+    long score = tc_eval(t, act, lev) * 10000L - forced;
+    for (int k = 0; k < 3; k++)
+        for (int j = 0; j < 3; j++) score += act[k] && act[k] == plain[j] ? 100 : 0;
+    return score;
+}
+/* 자동: the best set of up to three line colors for the eleven and the tactics as they are (out in fitting order). */
+static int tc_auto(const tc_team* base, const uint32_t plain[3], uint32_t out[3])
+{
+    uint32_t cand[47];
+    int ncand = 0, nout = 0;
+    for (uint32_t c = 1; c <= 47u; c++) {
+        const uint32_t r = TC_MASTER + c * 0x4Cu;
+        uint32_t g[5], p[5];
+        int ok = !tc_unused(c) && ld_be32(r + 0x40u) == 0 && tc_reqs(c, g, p) > 0 && vm_base[r + 0x3Au] == 0;
+        for (uint32_t k = 0; k < 5u && ok; k++)
+            ok = base->tac[k] >= vm_base[r + 0x2Cu + 2u * k] && base->tac[k] <= vm_base[r + 0x2Du + 2u * k];
+        if (ok) cand[ncand++] = c;
+    }
+    long best = tc_score(base, plain, 0);   /* nothing changed */
+    out[0] = out[1] = out[2] = 0;
+    for (int a = 0; a < ncand; a++)
+        for (int b = a; b < ncand; b++)
+            for (int c = b; c < ncand; c++) {
+                uint32_t set[3], order[3];
+                uint8_t state[3];
+                int n = 0, forced = 0;
+                if (b == a && c != b) continue;   /* {a, a, c} is {a, c}: taken at b = c */
+                set[n++] = cand[a];
+                if (b != a) set[n++] = cand[b];
+                if (c != b) set[n++] = cand[c];
+                tc_team t;
+                if (tc_plan_best(base, set, n, order, &t, state, &forced) != n) continue;
+                const long score = tc_score(&t, plain, forced);
+                if (score > best) { best = score; nout = n; memcpy(out, order, sizeof order); }
+            }
+    return nout;
+}
+static void tc_publish(saka_tc_status* st)
+{
+    for (uint32_t c = 1; c <= 70u && st->loaded; c++) {
+        memcpy(st->color_tac[c], vm_base + TC_MASTER + c * 0x4Cu + 0x2Cu, 10);
+        st->color_unused[c] = (uint8_t)tc_unused(c);
+    }
+    EnterCriticalSection(&s_tc_lock);
+    s_tc_status = *st;
+    LeaveCriticalSection(&s_tc_lock);
+}
+static void cheats_teamcolor_apply(int loaded)
+{
+    static int had_on;
+    static saka_tc_status st;   /* the cheat thread's own (it is large) */
+    if (!s_tc_lock_ready) { InitializeCriticalSection(&s_tc_lock); InterlockedExchange(&s_tc_lock_ready, 1); }
+    memset(&st, 0, sizeof st);
+    st.on = s_tc_cfg.on; st.mode = s_tc_cfg.mode; st.level = s_tc_cfg.level; st.upper = s_tc_cfg.upper;
+    memcpy(st.pick, s_tc_cfg.pick, sizeof st.pick);
+    tc_team team;
+    if (!loaded || !tc_tables_ok() || tc_read(&team) < 7) { tc_publish(&st); return; }
+    st.loaded = 1;
+    memcpy(st.tac, team.tac, 5);
+    tc_eval(&team, st.plain, st.plain_level);
+    int dirty = 0;
+    if (!s_tc_cfg.on) {
+        if (s_tc_nbackup || had_on) {   /* everyone gets his own slot back */
+            for (uint32_t k = 0; k < 23u && s_tc_nbackup; k++) {
+                const uint32_t rec = CHEAT_ROSTER + k * CHEAT_RECORD;
+                if (tc_backup_of(ld_be32(rec))) dirty |= tc_set_player(rec, 0, 0);
+            }
+            if (s_tc_nbackup) { s_tc_nbackup = 0; dirty = 1; }   /* players no longer in the club */
+            if (dirty) { tc_save_backups(); fprintf(stderr, "[cheats] team color fit off: the players' own styles are back\n"); }
+            had_on = 0;
+            s_tc_plan_sig = 0;
+        }
+        memcpy(st.active, st.plain, sizeof st.active); memcpy(st.active_level, st.plain_level, sizeof st.active_level);
+        tc_publish(&st);
+        return;
+    }
+    had_on = 1;
+    const uint32_t sig = tc_sig(&team);
+    if (sig != s_tc_plan_sig) {   /* the eleven, the tactics or the settings changed: plan again */
+        uint32_t set[3] = { 0, 0, 0 }, targets[3] = { 0, 0, 0 };
+        int n = 0, forced = 0;
+        tc_team t = team;
+        memset(s_tc_plan_state, 0, sizeof s_tc_plan_state);
+        if (s_tc_cfg.mode == 0) {
+            n = tc_auto(&team, st.plain, set);
+            if (n) tc_plan_best(&team, set, n, targets, &t, s_tc_plan_state, &forced);
+        } else {
+            for (int k = 0; k < 3; k++) {
+                int dup = 0;
+                for (int j = 0; j < n; j++) dup |= set[j] == s_tc_cfg.pick[k];
+                if (s_tc_cfg.pick[k] && !dup) set[n++] = s_tc_cfg.pick[k];
+            }
+            if (n) tc_plan_best(&team, set, n, targets, &t, s_tc_plan_state, &forced);
+        }
+        uint32_t act[3];
+        uint8_t lev[3];
+        tc_eval(&t, act, lev);
+        for (int k = 0; k < n; k++) {   /* what the styles cannot give: tactics, policies; or stronger colors first */
+            if (s_tc_plan_state[k]) continue;
+            const int why = tc_why_not(&t, targets[k]);
+            if (why) s_tc_plan_state[k] = (uint8_t)why;
+            else if (act[0] != targets[k] && act[1] != targets[k] && act[2] != targets[k]) s_tc_plan_state[k] = 6;
+        }
+        memcpy(s_tc_plan_style, t.style, sizeof s_tc_plan_style);
+        memcpy(s_tc_plan_ids, t.id, sizeof s_tc_plan_ids);
+        s_tc_plan_leader = t.leader_orig != team.leader_natural ? t.leader_orig : 0;
+        s_tc_plan_leader_id = t.leader_id;
+        memcpy(s_tc_plan_target, targets, sizeof targets);
+        s_tc_plan_ntarget = n;
+        s_tc_plan_sig = sig;
+        fprintf(stderr, "[cheats] team color fit (%s): colors %u %u %u (states %u %u %u), %d styles changed -> %u Lv%u, %u Lv%u, %u Lv%u (the players' own: %u Lv%u, %u Lv%u, %u Lv%u)\n",
+                s_tc_cfg.mode ? "picked" : "auto", targets[0], targets[1], targets[2], s_tc_plan_state[0], s_tc_plan_state[1],
+                s_tc_plan_state[2], forced, act[0], lev[0], act[1], lev[1], act[2], lev[2], st.plain[0], st.plain_level[0], st.plain[1],
+                st.plain_level[1], st.plain[2], st.plain_level[2]);
+    }
+    /* write the plan: the starters it changes and the KEY player; everyone else with a kept slot gets it back */
+    for (uint32_t k = 0; k < 23u; k++) {
+        const uint32_t rec = CHEAT_ROSTER + k * CHEAT_RECORD, id = ld_be32(rec);
+        if (!tc_player_ok(id)) continue;
+        uint32_t style = 0, orig = 0, natural = 0;
+        for (int i = 0; i < 11; i++)
+            if (team.valid[i] && team.rec[i] == rec && s_tc_plan_ids[i] == id && s_tc_plan_style[i] != team.natural[i]) {
+                style = s_tc_plan_style[i]; natural = team.natural[i];
+            }
+        if (rec == team.leader_rec && id == s_tc_plan_leader_id) orig = s_tc_plan_leader;
+        if (style || orig || tc_backup_of(id)) dirty |= tc_set_player(rec, style, orig);
+        if (style && st.nforced < 12) {
+            st.forced[st.nforced].id = id; st.forced[st.nforced].style = style; st.forced[st.nforced].natural = natural;
+            st.nforced++;
+        }
+    }
+    for (int i = 0; i < s_tc_nbackup;) {   /* kept slots of players who left the club */
+        int here = 0;
+        for (uint32_t k = 0; k < 23u && !here; k++) here = ld_be32(CHEAT_ROSTER + k * CHEAT_RECORD) == s_tc_backup[i].id;
+        if (here) i++;
+        else { tc_backup_drop(&s_tc_backup[i]); dirty = 1; }
+    }
+    if (dirty) { tc_save_backups(); s_cheat_hook_calls[30]++; }
+    {   /* what the game sees now: the slots as they are */
+        tc_team now = team;
+        for (int i = 0; i < 11; i++)
+            if (now.valid[i]) now.style[i] = ld_be32(tc_slot_of(now.rec[i]));
+        if (now.leader_rec) now.leader_orig = ld_be32(tc_slot_of(now.leader_rec) + 4u);
+        tc_eval(&now, st.active, st.active_level);
+    }
+    memcpy(st.target, s_tc_plan_target, sizeof st.target);
+    memcpy(st.target_state, s_tc_plan_state, sizeof st.target_state);
+    st.ntarget = s_tc_plan_ntarget;
+    st.leader_id = s_tc_plan_leader ? s_tc_plan_leader_id : 0;
+    st.leader_orig = s_tc_plan_leader;
+    tc_publish(&st);
+}
+void saka_teamcolor_status(saka_tc_status* out)   /* for the F2 팀컬러 tab */
+{
+    memset(out, 0, sizeof *out);
+    if (!s_tc_lock_ready) return;
+    EnterCriticalSection(&s_tc_lock);
+    *out = s_tc_status;
+    LeaveCriticalSection(&s_tc_lock);
+}
+
 /* SAKA_CARD_LOG=1 (diagnostic, 2026-11-09, red cards): the match result 0x00F97B24 (func_004A206C's param 2), two
  * teams of 0x37C from +0x604 (club ID), 23 players of 0x24 from +0x60C (ID), +0x620 goals, +0x625 yellows, +0x626 red:
  * every change is logged with the match tick, to find when and where the game writes them. */
@@ -1764,6 +2361,12 @@ static DWORD WINAPI cheat_thread(LPVOID arg)
         Sleep(100);
         if (!vm_base) continue;
         card_log_tick();
+        {   /* SAKA_SUPERPLAY_AUTO=<seconds> (tests): F6 by itself every so many seconds */
+            extern int saka_superplay_arm(void);
+            static int every = -1;
+            if (every < 0) { const char* e = getenv("SAKA_SUPERPLAY_AUTO"); every = e ? atoi(e) : 0; }
+            if (every > 0 && tick % ((unsigned)every * 10u) == 0 && cheat_game_loaded()) saka_superplay_arm();
+        }
         if (tick % 10 == 0) {
             cheat_profile_tick();
             const int a = cheat_file_changed("cheats/BLJM61064.txt", &s_cheat_time[0]);
@@ -1793,6 +2396,16 @@ static DWORD WINAPI cheat_thread(LPVOID arg)
                 cheats_staff_load();
                 fprintf(stderr, "[cheats] %d staff edits\n", s_ncheat_staff);
             }
+            {   /* the team color fit: its kept slots belong to the save, its settings to the file */
+                static LONG tc_slot = -100;
+                if (tc_slot != s_save_slot) { tc_slot = s_save_slot; tc_load_backups(); }
+                if (cheat_file_changed(cheat_path("teamcolor.txt"), &s_cheat_time[7])) {
+                    tc_load_config();
+                    fprintf(stderr, "[cheats] team color fit %s (%s; colors %u %u %u; skill level %u; upper colors %s)\n", s_tc_cfg.on ? "on" : "off",
+                            s_tc_cfg.mode ? "picked" : "auto", s_tc_cfg.pick[0], s_tc_cfg.pick[1], s_tc_cfg.pick[2], s_tc_cfg.level,
+                            s_tc_cfg.upper ? "on" : "off");
+                }
+            }
         }
         cheats_apply();
         if (s_ncheat_players || s_ncheat_lists || s_ncheat_train || s_ncheat_staff || tick % 20 == 0) {
@@ -1803,15 +2416,18 @@ static DWORD WINAPI cheat_thread(LPVOID arg)
             cheats_staff_apply(loaded);
             if (tick % 20 == 0) cheats_export(loaded);
         }
+        if (s_tc_cfg.on || s_tc_nbackup || tick % 10 == 0) cheats_teamcolor_apply(cheat_game_loaded());   /* after the player edits */
         static long shown[32];
         if (tick % 100 == 0 && memcmp(shown, (const void*)s_cheat_hook_calls, sizeof shown) != 0) {
             for (int i = 0; i < 32; i++) shown[i] = s_cheat_hook_calls[i];
             fprintf(stderr, "[cheats] code switches used: youth visit %ld, trade chance %ld, foreign slots %ld, "
                             "hizo roll %ld, facility check %ld, facility 1 week %ld, edit points %ld, substitution %ld, "
                             "interview %ld, course any %ld, slot keep %ld, training x %ld, special x %ld, awakening x %ld, "
-                            "negotiation %ld, full house %ld, satisfaction %ld, suspensions lifted %ld, team skill uses given back %ld, cards removed %ld, per-player x %ld\n",
+                            "negotiation %ld, full house %ld, satisfaction %ld, suspensions lifted %ld, team skill uses given back %ld, cards removed %ld, per-player x %ld, "
+                            "training reports started %ld, super plays %ld\n",
                     shown[1], shown[2], shown[3], shown[4], shown[5], shown[6], shown[7], shown[8], shown[9],
-                    shown[10], shown[11], shown[12], shown[13], shown[14], shown[15], shown[16], shown[17], shown[18], shown[19], shown[20], shown[31]);
+                    shown[10], shown[11], shown[12], shown[13], shown[14], shown[15], shown[16], shown[17], shown[18], shown[19], shown[20], shown[31],
+                    shown[29], shown[23]);
         }
     }
     return 0;
@@ -1987,6 +2603,7 @@ void saka_cards_hook(ppu_context* ctx)   /* func_00572524 return: r3 = the 5-byt
  * match team object, whose +0 is the club (bench: t0 data +8 = 0x00F8F158, club 0x100; t1 0x00F9351C, club 0x21).
  * -1 = not known (the old check). */
 static volatile int s_engine_user[2] = {-1, -1};
+static void superplay_kickoff(void);
 void saka_team_skill_kickoff_hook(uint32_t entry, uint32_t t)
 {
     if (t > 1u || !cheat_committed(entry, 8u)) return;
@@ -1994,6 +2611,7 @@ void saka_team_skill_kickoff_hook(uint32_t entry, uint32_t t)
     const uint32_t obj = cheat_committed(data, 0xCu) ? ld_be32(data + 8u) : 0;
     const uint32_t club = obj && cheat_committed(obj, 4u) ? ld_be32(obj) : 0;
     s_engine_user[t] = club ? (club == 0x100u || club == ld_be32(0x00EE28ACu)) : -1;
+    if (t == 0) superplay_kickoff();   /* a new kick-off: an F6 from before it is forgotten */
     fprintf(stderr, "[cheats] kick-off: engine team %u data 0x%08X team object 0x%08X club 0x%X -> %s\n", t, data, obj, club,
             s_engine_user[t] > 0 ? "user" : s_engine_user[t] == 0 ? "other" : "not known");
 }
@@ -2157,9 +2775,65 @@ void saka_awaken_ready_hook(ppu_context* ctx)   /* func_005177A0, a 能力覚醒
  *   plan (func_00515B80: its end effect, the awakening points, once as normal). So the plan's whole experience comes in
  *   one week. The data cheat 'SP 연습 1턴 완료' sets 1 without that (one week's experience). */
 static uint8_t s_sp_weeks[3] = {1, 1, 1};
+/* The plans' report records (2026-11-14, owner: "치트로 설정해 놓은 연습들이 이벤트가 단 한번도 일어나지않았어 ... 효과가
+ * 없어"; REA Ghidra, re/decomp_all.c). The game's assign functions start one per slot, and the weekly pass gives a
+ * plan's result and its event only when that record carries the plan's player:
+ *   SP     0x00EEB724 + slot x 0x18 (func_00511F50): +0 player, +4 his rating then (func_00564BAC), +0x10 the experience
+ *          so far; func_00515B80 at the end: +0xA awakening points, +0xC course, +0x14, event 0x24 (0x27 on a rating rise).
+ *   能力覚醒 0x00EEB76C + slot x 0x18 (func_0051A820): +0 player; at the end +0xC course, +0x14 the skill roll, event 0x25.
+ *   個性強化 0x00EEB7B4 + slot x 0x10 (func_0051A9EC): +0 player; at the end +4 course, +8 trait roll, +0xC skill roll,
+ *          event 0x6A; the event scene gives the trait or the skill from this record.
+ * The F2 slots and SLOT KEEP fill a slot without those functions (they charge the fee and clear the advice list), so
+ * the record stayed empty or kept the last plan's result: no roll, no event, nothing given (the owner's log: "hizo
+ * roll 0" over weeks of finished plans). Before each weekly pass every running slot now gets the record its assign
+ * function would have left: started again when it carries another player, or still shows a finished plan (+0xC / +4
+ * course set; the game's own records never do while the slot runs). The last result stays until then, so the event
+ * shown after the pass still reads it. The SP record's rating is taken by the game's own function, called from the
+ * recompiled code right after this hook (saka_train_sp_report_rec). */
+static uint32_t s_sp_report_new[3];
+static uint32_t train_roster_record(uint32_t id)
+{
+    if (!id) return 0;
+    for (uint32_t k = 0; k < 23u; k++)
+        if (ld_be32(CHEAT_ROSTER + k * CHEAT_RECORD) == id) return CHEAT_ROSTER + k * CHEAT_RECORD;
+    return 0;
+}
+static void train_report_sync(void)
+{
+    if (!cheat_committed(0x00EE83A8u, 0x84u) || !cheat_committed(0x00EEB724u, 0xC0u)) return;
+    for (uint32_t i = 0; i < 3u; i++) {
+        const uint32_t slot = 0x00EE83A8u + 0xCu * i, rep = 0x00EEB724u + 0x18u * i, id = ld_be32(slot);
+        const uint32_t rec = vm_base[slot + 8] ? train_roster_record(id) : 0;
+        s_sp_report_new[i] = 0;
+        if (!rec || (ld_be32(rep) == id && ld_be32(rep + 0xCu) == 0)) continue;
+        memset(vm_base + rep, 0, 0x18);
+        st_be32(rep, id);
+        s_sp_report_new[i] = rec;
+        s_cheat_hook_calls[29]++;
+    }
+    for (uint32_t i = 0; i < 3u; i++) {
+        const uint32_t slot = 0x00EE83CCu + 0x20u * i, id = ld_be32(slot);
+        if (!vm_base[slot + 0xC] || !train_roster_record(id)) continue;
+        const int awaken = vm_base[slot + 4] == 1;
+        if (!awaken && vm_base[slot + 4] != 0) continue;
+        const uint32_t rep = awaken ? 0x00EEB76Cu + 0x18u * i : 0x00EEB7B4u + 0x10u * i;
+        if (ld_be32(rep) == id && ld_be32(rep + (awaken ? 0xCu : 4u)) == 0) continue;
+        memset(vm_base + rep, 0, awaken ? 0x18 : 0x10);
+        st_be32(rep, id);
+        s_cheat_hook_calls[29]++;
+    }
+}
+uint32_t saka_train_sp_report_rec(uint32_t i)   /* the player record whose SP report (slot i) started in this pass, else 0 */
+{
+    if (i >= 3u) return 0;
+    const uint32_t rec = s_sp_report_new[i];
+    s_sp_report_new[i] = 0;
+    return rec;
+}
 void saka_train_snapshot_hook(ppu_context* ctx)   /* func_005177A0 before its SP and 秘蔵っ子 passes */
 {
     (void)ctx;
+    train_report_sync();
     for (uint32_t i = 0; i < 3u; i++) {
         const uint32_t slot = 0x00EE83A8u + 0xCu * i;
         const uint8_t w = vm_base[slot + 8];
@@ -2373,23 +3047,115 @@ void saka_slot_dup_hook(ppu_context* ctx)
  *   관련한 스크립트를 작동하게"): a skill's play (光プレー) comes from func_0023B100: for each candidate the play
  *   offers (func_0024D348: skills of the players in it that match the play), rand(10000)/100 against the skill's
  *   chance; the successes then compete with rand(100)+1, and the winner's skill and player go into the play record
- *   (+0x2564 / +0x2568), from which the game plays its own scene. F6 arms it for 20 s: the next candidate of the
- *   user's team succeeds (the roll is put below the chance) and the other team's fail for that play, so the game's
- *   flow stays its own. It needs a candidate: a play where one of the user's players has a matching skill. At the
- *   compare: r22 = the match, r27 = the candidate's engine team entry (match + 0x334 + t x 0x126C), fpr31 = the roll. */
-static volatile uint64_t s_superplay_until, s_superplay_done_until;
+ *   (+0x2564 / +0x2568), from which the game plays its own scene. At the compare: r22 = the match, r27 = the
+ *   candidate's engine team entry (match + 0x334 + t x 0x126C), fpr31 = the roll.
+ * 2026-11-14 (owner: "히카리플레이가 작동하지 않아. 누르면 무조건 작동하게 해줘. 무슨 조건 상관없이"; the owner's log:
+ *   about 40 presses in a match, one forced play): the old 20 s arming only forced the roll, and a play has a
+ *   candidate only when one of the user's players in it OWNS a skill of a kind that fits the play, which is rare.
+ *   Now F6 stays armed until it is used, and while it is armed the user's players in a play are offered every skill
+ *   that fits it, owned or not (REA Ghidra + the EBOOT's tables):
+ *     the match skill table PTR 0x00AC0EC4 (183 x 0x34, the ids of skill_name.txb): +0xC u8 grade (chance 1-100%),
+ *       +0x10 side (1 the side with the ball, 2 the other, 3 either), +0x14 kind, +0x18 0 = a play skill (1 = a
+ *       passive one), +0x1C 5/6 = one more condition at the roll (func_002D617C / func_002D6204);
+ *     the kind table PTR 0x00AA5494 (kind x 0x18): +4.. the five play kinds (the play's +4) the kind fits: 0-4
+ *       dribbles (dribbles; tackle and charge on the other side), 5 pass, 6 feed / cross, 8 / 9 shots, 11-15 traps,
+ *       17 / 18 saves, 20 pass cut.
+ *   func_0024D348 takes a participant's six skills into its frame (sp + 0xAC), then tries each: the kind must fit
+ *   the play, func_0024C450 must build the skill's version of the play, and that version must be of the play's own
+ *   class (func_002419B4 +8 / +0x10). saka_superplay_skills_hook (after the six are fetched: r30 = the player's
+ *   match object, [+0xBC] -> his record; r21 = his team in the play, r18 = the play's context: +0x2B0 + team x 4 the
+ *   engine team, +0x2C4 the side with the ball; r20 = the play, +4 its kind) lists one skill of each fitting kind
+ *   the player does not have (the level-7 one; keeper skills only for a keeper, +0x204 = 0; none with +0x1C over
+ *   4). saka_superplay_more_hook (after the six were tried; r23 = the candidate table, +team x 4 its count) puts
+ *   the next ones into the frame and has the loop run again, until the team has a candidate or the list ends; a
+ *   team's table holds five (0x17C = 5 x 0x4C), so never more than five at a time. The game's own checks all stay,
+ *   so only plays the engine can show are made; the phases without skill plays (the play context's +0x298 4 / 5,
+ *   situations 0x25 / 0x28-0x2A / 0x2E) stay without. The roll hook then makes the user's first candidate succeed
+ *   and the other team's fail in that play. Armed until used; a kick-off clears it, and so do two minutes without a
+ *   play (F6 pressed outside a match: the badge would stay otherwise; in a match the wait was 0-35 s). */
+static volatile LONG s_superplay_armed;
+static volatile uint64_t s_superplay_done_until, s_superplay_fired_at, s_superplay_armed_at;
+static volatile long s_superplay_offers;   /* plays in which skills were offered while armed (diagnosis) */
 int saka_superplay_arm(void)
 {
     if (!s_cheat_switch[23]) return 0;
-    s_superplay_until = GetTickCount64() + 20000u;
-    fprintf(stderr, "[cheats] super play armed (F6, 20 s)\n");
+    s_superplay_armed_at = GetTickCount64();
+    InterlockedExchange(&s_superplay_armed, 1);
+    fprintf(stderr, "[cheats] super play armed (F6): the user's team's next play\n");
     return 1;
 }
+int saka_superplay_state(void)   /* for the F2 badge: 0 idle, 1 armed, 2 used in the last 3 s */
+{
+    if (s_superplay_armed && GetTickCount64() - s_superplay_armed_at > 120000u) InterlockedExchange(&s_superplay_armed, 0);
+    if (s_cheat_switch[23] && s_superplay_armed) return 1;
+    return s_superplay_fired_at && GetTickCount64() - s_superplay_fired_at < 3000u ? 2 : 0;
+}
+static struct { uint32_t frame, team; int n, pos; uint8_t list[72]; } s_sp_it;
+static int superplay_kind_fits(uint32_t kinds, uint32_t kind, int32_t pk)
+{
+    if (kind >= 0x44u) return 0;
+    for (uint32_t j = 1; j <= 5u; j++)
+        if ((int32_t)ld_be32(kinds + kind * 0x18u + 4u * j) == pk) return 1;
+    return 0;
+}
+void saka_superplay_skills_hook(ppu_context* ctx)   /* func_0024D348, a participant's six skills are in the frame */
+{
+    s_sp_it.n = s_sp_it.pos = 0;
+    if (!s_cheat_switch[23] || !s_superplay_armed) return;
+    const uint32_t sp = (uint32_t)ctx->gpr[1], pctx = (uint32_t)ctx->gpr[18], play = (uint32_t)ctx->gpr[20];
+    const uint32_t team = (uint32_t)ctx->gpr[21], obj = (uint32_t)ctx->gpr[30];
+    if (team > 1u || !cheat_committed(pctx + 0x2B0u, 0x18u) || !cheat_committed(play, 0x10u) || !cheat_committed(obj + 0xBCu, 4u)) return;
+    if (!match_team_is_user(ld_be32(pctx + 0x2B0u + 4u * team))) return;
+    const uint32_t skills = ld_be32(0x00AC0EC4u), kinds = ld_be32(0x00AA5494u);
+    if (!cheat_committed(skills, 183u * 0x34u) || !cheat_committed(kinds, 0x44u * 0x18u)) return;
+    const uint32_t pp = ld_be32(obj + 0xBCu);
+    const uint32_t rec = cheat_committed(pp, 4u) ? ld_be32(pp) : 0;
+    if (!rec || !cheat_committed(rec, CHEAT_RECORD)) return;
+    const int keeper = ld_be32(rec + 0x204u) == 0;
+    const int32_t pk = (int32_t)ld_be32(play + 4u);
+    const int same = ld_be32(pctx + 0x2C4u) == team;
+    uint8_t best[0x44];
+    memset(best, 0, sizeof best);
+    for (uint32_t id = 1; id <= 146u; id++) {
+        const uint32_t r = skills + id * 0x34u;
+        const uint32_t side = ld_be32(r + 0x10u), kind = ld_be32(r + 0x14u);
+        if (ld_be32(r + 0x18u) != 0 || ld_be32(r + 0x1Cu) > 4u || kind >= 0x44u) continue;
+        if ((side == 1u && !same) || (side == 2u && same) || side == 0 || side > 3u) continue;
+        if ((kind == 0x20u || kind == 0x21u || kind == 0x40u) != keeper) continue;
+        if (!superplay_kind_fits(kinds, kind, pk)) continue;
+        const int top = id <= 112u && id % 7u == 0;   /* the level-7 skill of a type */
+        const int had = best[kind] && best[kind] <= 112u && best[kind] % 7u == 0;
+        if (!best[kind] || (top && !had)) best[kind] = (uint8_t)id;
+    }
+    for (uint32_t kind = 0; kind < 0x44u; kind++) {
+        if (!best[kind]) continue;
+        int own = 0;   /* a skill of this kind is among his six: the game tries it itself */
+        for (uint32_t i = 0; i < 6u && !own; i++) {
+            const uint32_t id = ld_be32(sp + 0xACu + 4u * i);
+            own = id && id < 183u && ld_be32(skills + id * 0x34u + 0x14u) == kind && ld_be32(skills + id * 0x34u + 0x18u) == 0;
+        }
+        if (!own && s_sp_it.n < (int)sizeof s_sp_it.list) s_sp_it.list[s_sp_it.n++] = best[kind];
+    }
+    s_sp_it.frame = sp;
+    s_sp_it.team = team;
+    if (s_sp_it.n) s_superplay_offers++;
+}
+int saka_superplay_more_hook(ppu_context* ctx)   /* func_0024D348, the six in the frame were tried; 1 = six more are in it */
+{
+    if (s_sp_it.pos >= s_sp_it.n) return 0;
+    const uint32_t sp = (uint32_t)ctx->gpr[1], table = (uint32_t)ctx->gpr[23], team = (uint32_t)ctx->gpr[21];
+    if (sp != s_sp_it.frame || team != s_sp_it.team || !s_superplay_armed || !cheat_committed(table, 8u)) { s_sp_it.n = 0; return 0; }
+    if (ld_be32(table + 4u * team) >= 1u) { s_sp_it.n = 0; return 0; }   /* the team has its candidate */
+    for (uint32_t i = 0; i < 6u; i++)   /* five at most: a team's table holds five candidates */
+        st_be32(sp + 0xACu + 4u * i, i < 5u && s_sp_it.pos < s_sp_it.n ? s_sp_it.list[s_sp_it.pos++] : 0u);
+    return 1;
+}
+static void superplay_kickoff(void) { InterlockedExchange(&s_superplay_armed, 0); }
 void saka_superplay_hook(ppu_context* ctx)
 {
     if (!s_cheat_switch[23]) return;
     const uint64_t now = GetTickCount64();
-    const int armed = now < s_superplay_until, done = now < s_superplay_done_until;
+    const int armed = s_superplay_armed != 0, done = now < s_superplay_done_until;
     if (!armed && !done) return;
     const uint32_t entry = (uint32_t)ctx->gpr[27], match = (uint32_t)ctx->gpr[22];
     if (entry < match + 0x334u) return;
@@ -2398,10 +3164,11 @@ void saka_superplay_hook(ppu_context* ctx)
     if (match_team_is_user(t)) {
         if (!armed) return;
         ctx->fpr[31] = -1.0;   /* below any chance: this candidate succeeds */
-        s_superplay_until = 0;
+        InterlockedExchange(&s_superplay_armed, 0);
         s_superplay_done_until = now + 500u;   /* the rest of this play: the other team's candidates still fail */
+        s_superplay_fired_at = now;
         s_cheat_hook_calls[23]++;
-        fprintf(stderr, "[cheats] super play: the user's team's skill forced\n");
+        fprintf(stderr, "[cheats] super play: the user's team's skill forced (plays offered skills while armed: %ld)\n", s_superplay_offers);
     } else
         ctx->fpr[31] = 1.0e9;  /* above any chance */
 }
