@@ -14,7 +14,7 @@ import sys
 from io import BytesIO
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from saka_par import compress, entries, replace_payloads  # noqa: E402
@@ -65,7 +65,9 @@ def L(region, text, mode="clear", **kw):
     inpaint (only the label's own pixels, replaced by the median of the nearest background pixels).
     Options: vertical (one character per line), align (center/left/right), shear (italic slant, e.g. 0.18),
     rotate (degrees counter-clockwise, for tilted badge text), grow (inpaint: px added around the label's pixels),
-    weight (bold/regular), color (r, g, b), size (font px), pad (erase margin, default 2), thr (contrast)."""
+    weight (bold/regular), color (r, g, b), size (font px), pad (erase margin, default 2), thr (contrast),
+    squeeze (glyph width factor below 1, for long names in a narrow sprite), outline ((r, g, b), px: a rim around
+    the glyphs), shadow ((r, g, b), px: a soft dark halo under them, as the red stamps have)."""
     return dict(region=region, text=text, mode=mode, **kw)
 
 
@@ -243,6 +245,14 @@ except ImportError:
     MORE = {}
 for _rel, _members in MORE.items():
     LABELS.setdefault(_rel, {}).update(_members)
+try:   # 2026-11-14, second batch: its labels are ADDED to a member that already has some (hall of fame, tactics, ...)
+    from korean_ui_more2 import MORE as MORE2
+except ImportError:
+    MORE2 = {}
+for _rel, _members in MORE2.items():
+    for _member, _labs in _members.items():
+        _have = LABELS.setdefault(_rel, {}).get(_member, [])
+        LABELS[_rel][_member] = list(_have) + list(_labs)
 
 
 # ---- image work --------------------------------------------------------------------------------------------------
@@ -394,6 +404,8 @@ def text_layer(lab, size, color):
         x = 4 + (0 if align == "left" else w - lw if align == "right" else (w - lw) // 2) - b[0]
         y = 4 + i * (lh + gap) - b[1]
         d.text((x, y), ln, font=font, fill=255)
+    if lab.get("squeeze"):   # narrower glyphs (2026-11-14: eight-syllable names in the collection's name sprites)
+        mask = mask.resize((max(1, int(round(mask.width * lab["squeeze"]))), mask.height), Image.LANCZOS)
     shear = lab.get("shear", 0)
     if shear:
         extra = int(abs(shear) * mask.height) + 1
@@ -402,6 +414,24 @@ def text_layer(lab, size, color):
         mask = wide.transform(wide.size, Image.AFFINE, (1, shear, -shear * mask.height, 0, 1, 0), Image.BICUBIC)
     if lab.get("rotate"):   # degrees, counter-clockwise (badges with tilted text)
         mask = mask.rotate(lab["rotate"], resample=Image.BICUBIC, expand=True)
+    under = lab.get("outline") or lab.get("shadow")
+    if under:   # a rim (outline) or a soft halo (shadow) in another colour under the glyphs (2026-11-14)
+        uc, uw = under[:2]
+        strength = under[2] if len(under) > 2 else 1.0   # a third value below 1 makes the halo lighter
+        edge = 2 if lab.get("outline") else 2 + 2 * uw   # room for the blur
+        wide = Image.new("L", (mask.width + 2 * (uw + edge), mask.height + 2 * (uw + edge)), 0)
+        wide.paste(mask, (uw + edge, uw + edge))
+        rim = wide.filter(ImageFilter.MaxFilter(2 * uw + 1))
+        rim = rim.filter(ImageFilter.GaussianBlur(0.6 if lab.get("outline") else max(1.0, uw * 0.6)))
+        if strength < 1:
+            rim = rim.point(lambda v: int(v * strength))
+        layer = Image.new("RGBA", wide.size, tuple(uc) + (0,))
+        layer.putalpha(rim)
+        top = Image.new("RGBA", wide.size, tuple(color) + (0,))
+        top.putalpha(wide)
+        layer.alpha_composite(top)
+        box = rim.point(lambda v: 255 if v > 8 else 0).getbbox()
+        return layer.crop(box) if box else layer
     layer = Image.new("RGBA", mask.size, tuple(color) + (0,))
     layer.putalpha(mask)
     box = mask.getbbox()
@@ -420,8 +450,30 @@ def disc_clip(im, lab, centre):
                 px[x, y] = (0, 0, 0, 0)
 
 
+def wipe_band(im, lab):
+    """A stamp whose tilted text runs across its ring (2026-11-14): the strip the text and its shadow fill is made
+    transparent, so the ring keeps its two arcs. band = (centre x, centre y, length, thickness, degrees ccw)."""
+    import math
+    x0, y0, x1, y1 = lab["region"]
+    cx, cy, length, thick, deg = lab["band"]
+    ca, sa = math.cos(math.radians(deg)), math.sin(math.radians(deg))
+    px = im.load()
+    for y in range(y0, y1):
+        for x in range(x0, x1):
+            dx, dy = x - cx, cy - y
+            u, v = dx * ca + dy * sa, -dx * sa + dy * ca
+            cover = max(0.0, min(1.0, thick / 2 + 0.5 - abs(v))) * max(0.0, min(1.0, length / 2 + 0.5 - abs(u)))
+            if cover > 0 and px[x, y][3]:
+                c = px[x, y]
+                a = int(round(c[3] * (1 - cover)))
+                px[x, y] = (c[0], c[1], c[2], a) if a else (0, 0, 0, 0)
+
+
 def draw_label(im, lab):
     centre = None
+    if lab.get("band"):
+        wipe_band(im, lab)
+        return lab["region"], 0, (0, 0, 0)
     if lab.get("disc"):
         x0, y0, x1, y1 = lab["region"]
         px = im.load()
@@ -435,12 +487,19 @@ def draw_label(im, lab):
         while (layer.width > x1 - x0 or layer.height > y1 - y0) and size > 8:
             size -= 1
             layer = text_layer(lab, size, lab["color"])
-        im.alpha_composite(layer, ((x0 + x1 - layer.width) // 2, (y0 + y1 - layer.height) // 2))
+        al, rot = lab.get("align", "center"), lab.get("rotate", 0)
+        lx = x0 if al == "left" else x1 - layer.width if al == "right" else (x0 + x1 - layer.width) // 2
+        ly = (y0 + y1 - layer.height) // 2
+        if al != "center" and rot:   # tilted text: its start is the high end when it runs down to the right
+            ly = y0 if (al == "left") == (rot < 0) else y1 - layer.height
+        im.alpha_composite(layer, (lx, ly))
         return lab["region"], size, lab["color"]
     if lab["mode"] == "inpaint":   # sprite on transparency (gaps between strokes) -> alpha ink, else colour ink
         x0, y0, x1, y1 = lab["region"]
         px = im.load()
-        tr = lab.get("ink") != "light" and             sum(1 for y in range(y0, y1) for x in range(x0, x1) if px[x, y][3] < 8) > (x1 - x0) * (y1 - y0) * 0.15
+        # opaque=True: a label on a picture whose region also holds some transparent pixels (the grey "none" head)
+        tr = lab.get("ink") != "light" and not lab.get("opaque") and \
+            sum(1 for y in range(y0, y1) for x in range(x0, x1) if px[x, y][3] < 8) > (x1 - x0) * (y1 - y0) * 0.15
         ink, bbox, color, bg = find_ink(im, dict(lab, mode="clear" if tr else "fill"))
         inpaint(im, dict(lab, transparent=tr), ink, bg)
     else:

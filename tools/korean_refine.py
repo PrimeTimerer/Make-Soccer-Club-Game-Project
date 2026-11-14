@@ -103,6 +103,16 @@ STATIC = {
     (20, 85): '슛(유효 슛)', (20, 90): '점유율', (20, 98): '불필요',
 }
 
+# Corrections by file and (table, id) (2026-11-14). gm_callname_text: how the secretary calls the manager, the words
+# of the secretary edit's CALL list (the image list uses the same words); the two that go before the name end with a
+# space.
+FIXES = {
+    'text2/gm_callname_text.txb': {
+        (0, 2): '군', (0, 4): '미스터 ', (0, 7): '주인님', (0, 10): '선생', (0, 11): '당신', (0, 12): '선생님',
+        (0, 13): '오너', (0, 14): '뿅', (0, 15): '서 ', (0, 16): '사부', (0, 19): '찌',
+    },
+}
+
 
 def original_path(relative):
     for folder in ('game/dev_hdd0/game/BLJM61064/USRDIR/data', 'game/dev_bdvd/PS3_GAME/USRDIR/data'):
@@ -181,6 +191,9 @@ def main():
                 ko[key] = TERMS[original]
         if relative.as_posix() == 'text/txt_static_data.arch':
             refine_static(jp, ko)
+        for key, value in FIXES.get(relative.as_posix(), {}).items():
+            if key in ko:
+                ko[key] = value
         changed = {key: encode(value) for key, value in ko.items() if value != decode(raw[key])}
         if not changed:
             continue
