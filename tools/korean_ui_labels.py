@@ -408,7 +408,26 @@ def text_layer(lab, size, color):
     return layer.crop(box) if box else layer
 
 
+def disc_clip(im, lab, centre):
+    """A round badge (2026-11-14): the old text's dark outline that stuck out of the disc is cleared, so the shorter
+    Korean text does not leave its shape. centre = the centroid of the region's opaque pixels before the text went."""
+    x0, y0, x1, y1 = lab["region"]
+    rx, ry = lab.get("disc_r", (43.5, 42.5))
+    px = im.load()
+    for y in range(y0, y1):
+        for x in range(x0, x1):
+            if ((x - centre[0]) / rx) ** 2 + ((y - centre[1]) / ry) ** 2 > 1.0 and px[x, y][3]:
+                px[x, y] = (0, 0, 0, 0)
+
+
 def draw_label(im, lab):
+    centre = None
+    if lab.get("disc"):
+        x0, y0, x1, y1 = lab["region"]
+        px = im.load()
+        solid = [(x, y) for y in range(y0, y1) for x in range(x0, x1) if px[x, y][3] > 128]
+        if solid:
+            centre = (sum(p[0] for p in solid) / len(solid), sum(p[1] for p in solid) / len(solid))
     if lab.get("draw_only"):   # text only, on background other labels of the list already cleared
         x0, y0, x1, y1 = lab["region"]
         size = lab["size"]
@@ -427,15 +446,19 @@ def draw_label(im, lab):
     else:
         ink, bbox, color, bg = find_ink(im, lab)
         erase(im, lab, bbox, bg)
+    if centre:
+        disc_clip(im, lab, centre)
     if not lab["text"]:   # erase only (the text comes from a draw_only label)
         return bbox, 0, color
     x0, y0, x1, y1 = lab["region"]
     bw, bh = bbox[2] - bbox[0], bbox[3] - bbox[1]
     n = len(lab["text"]) if lab.get("vertical") else lab["text"].count("\n") + 1
     size = lab.get("size") or max(8, int(bh / n * 1.05))
+    maxw = lab.get("maxw", x1 - x0)   # maxw: narrower than the region (a badge's disc, 2026-11-14)
+    maxh = lab.get("maxh", bh + 2)
     while True:   # fit: the ink box height, the region's width
         layer = text_layer(lab, size, color)
-        if (layer.height <= bh + 2 and layer.width <= (x1 - x0)) or size <= 8:
+        if (layer.height <= maxh and layer.width <= maxw) or size <= 8:
             break
         size -= 1
     align = lab.get("align", "center")

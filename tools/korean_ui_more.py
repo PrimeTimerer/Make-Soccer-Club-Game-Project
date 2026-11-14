@@ -1191,3 +1191,48 @@ MORE = {
         ],
     },
 }
+
+
+# ---- the trait badges and the ability stamps (2026-11-14, owner: "다른 대기 작업들도"): tilted text. A round badge is a
+# dark disc with light text; its region is the disc's own box (measured), `disc` clears what stuck out of the disc
+# with the old text. A square stamp is dark ink on transparency inside a frame with a star at its top left: the strip
+# right of the star is cleared first, then the text below it is redrawn. The wording follows the corrected text tables
+# (korean_refine.py TERMS).
+def _badge(box, text):
+    return L(box, text, 'inpaint', ink='light', lum=88, grow=2, rotate=17, shear=0.12, disc=True, disc_r=(42.4, 41.4), maxw=66, size=22)
+
+
+def _stamp(x0, y0, text):
+    return [L((x0 + 25, y0 + 7, x0 + 77, y0 + 24), '', 'inpaint'),
+            L((x0 + 7, y0 + 24, x0 + 77, y0 + 73), text, 'inpaint', rotate=17, shear=0.12, maxw=62, size=24)]
+
+
+_RESULT_STAMPS = [
+    (372, 0, '슛'), (464, 0, '드리블'), (556, 0, '패스'), (740, 0, '헤딩'),                      # FK stays
+    (372, 84, '태클'), (464, 84, '패스컷'), (556, 84, '세이빙'), (648, 84, '전진'), (740, 84, '스피드'),
+    (372, 168, '스태미나'), (464, 168, '파워'), (556, 168, '정신력'), (648, 168, '전술이해'), (740, 168, '시스템\n이해'),
+]
+_RESULT_BADGES = [
+    ((372, 253, 456, 335), '2단계\n성장'), ((464, 253, 548, 335), '장기\n안정성장'), ((556, 253, 640, 335), '육아남'),
+    ((645, 253, 735, 335), '캡틴십'), ((740, 253, 824, 335), '미래의\n코치'),
+    ((372, 337, 456, 419), '스타\n선수'), ((464, 337, 548, 419), '적응력\n높음'), ((556, 337, 640, 419), '설득력\n있음'),
+    ((647, 337, 735, 419), '전술이해\n빠름'), ((738, 337, 826, 419), '시스템이해\n빠름'),
+    ((372, 421, 457, 503), '더비남'), ((464, 421, 548, 503), '터프가이'), ((556, 421, 640, 503), '팬\n서비스'),
+    ((647, 421, 735, 503), '프로의식\n높음'), ((740, 421, 824, 503), '무드\n메이커'),
+    ((904, 441, 988, 523), '철인'),
+    ((536, 505, 620, 587), '잘\n챙겨줌'), ((628, 505, 712, 587), '역경에\n강함'), ((720, 505, 804, 587), '미래의\n감독'),
+    ((812, 505, 896, 587), '큰 무대\n강함'), ((900, 525, 991, 607), '페어\n플레이'), ((536, 597, 620, 679), '미남'),
+]
+_SLOT_BADGES = [
+    ((314, 411, 398, 493), '2단계\n성장'), ((402, 411, 486, 493), '적응력\n높음'), ((490, 411, 578, 493), '프로의식\n높음'),
+    ((586, 411, 677, 493), '페어\n플레이'),
+    ((314, 499, 398, 581), '장기\n안정성장'), ((403, 499, 486, 581), '설득력\n있음'), ((490, 499, 574, 581), '무드\n메이커'),
+    ((314, 587, 398, 669), '육아남'), ((403, 587, 491, 669), '전술이해\n빠름'), ((498, 587, 582, 669), '잘\n챙겨줌'),
+    ((314, 675, 398, 757), '미남'), ((400, 675, 488, 757), '시스템이해\n빠름'), ((498, 675, 582, 757), '역경에\n강함'),
+    ((310, 763, 399, 845), '캡틴십'), ((400, 763, 486, 845), '더비남'), ((498, 763, 582, 845), '미래의\n감독'),
+    ((314, 851, 398, 933), '미래의\n코치'), ((402, 851, 486, 933), '터프가이'), ((498, 851, 582, 933), '큰 무대\n강함'),
+    ((314, 939, 398, 1021), '스타\n선수'), ((402, 939, 486, 1021), '팬\n서비스'), ((498, 939, 582, 1021), '철인'),
+]
+MORE['sb3/edit_player_result.par']['tex_edit_player_result.dds'] += \
+    [lab for x0, y0, text in _RESULT_STAMPS for lab in _stamp(x0, y0, text)] + [_badge(box, text) for box, text in _RESULT_BADGES]
+MORE['sb3/edit_player_slot.par']['sensyu_slot_tex.dds'] += [_badge(box, text) for box, text in _SLOT_BADGES]

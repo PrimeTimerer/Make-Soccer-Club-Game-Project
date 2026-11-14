@@ -8,6 +8,7 @@ from collections import defaultdict, Counter
 import json
 import re
 from korean_text import tables, decode, encode, repack
+from make_teamcolors import KO as TEAM_COLOR_KO   # the F2 팀컬러 tab's names: the game shows the same (2026-11-14)
 
 ROOT = Path(__file__).resolve().parents[1]
 OVERLAY = ROOT / 'game/mods/korean/data'
@@ -81,6 +82,12 @@ TERMS = {
     'セーブデータをロードします。よろしいですか？': '저장 데이터를 불러올까요?',
     '再開するセーブデータを選択してください。': '불러올 저장 데이터를 선택하세요.',
     'エディット選手を2人以上チームに所属させることはできません。': '에디트 선수는 최대 3명까지 소속시킬 수 있습니다.',
+    # 2026-11-14: the traits and abilities drawn on the edit-result badges (korean_ui_more.py), as on the badges
+    'キャプテンシー': '캡틴십', 'イクメン': '육아남', 'ダービー男': '더비남', 'ムードメーカー': '무드 메이커',
+    '未来のコーチ': '미래의 코치', '未来の監督': '미래의 감독', '順応性が高い': '적응력 높음', '説得力がある': '설득력 있음',
+    '戦術理解が早い': '전술이해 빠름', 'システム理解が早い': '시스템이해 빠름', 'プロ意識が高い': '프로의식 높음',
+    '面倒見が良い': '잘 챙겨줌', '逆境に強い': '역경에 강함', '大舞台に強い': '큰 무대 강함', '二段階成長': '2단계 성장',
+    '長期安定成長': '장기 안정성장', 'セービング': '세이빙', '飛び出し': '전진',
 }
 
 STATIC = {
@@ -146,6 +153,9 @@ def refine_static(jp, ko):
     for club, (short, full) in enumerate(J_CLUBS, 1):
         ko[(3, club)], ko[(4, club)] = short, full
     ko.update(STATIC)
+    for color, name in TEAM_COLOR_KO.items():   # table 19: the team color names (the font has ・ and ＆)
+        if (19, color) in ko:
+            ko[(19, color)] = name.replace('·', '・').replace(' & ', '＆')
 
 
 def main():
