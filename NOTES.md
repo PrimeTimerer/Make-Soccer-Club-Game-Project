@@ -2,6 +2,8 @@
 
 1.03 runtime contract (boot mode, VFS, DLC = not used):
 `docs\PORT_1.03_RUNTIME.md` (moved from `..\Fight Emulations\Saka Tsuku - Pro Soccer Club o Tsukurou (Japan)\PC PORT` on 2026-11-09).
+Recomp guide for the next port (Korean, in the YKTK3 guide's format): `docs\리컴프_지침서.md` (2026-11-09).
+Bench scripts (matchbench, menubench, cheatbench, fullmatch, sndtest, framesheet and the census/scan comparers) now live in `tools\bench\` (README there); they were in session scratchpads before. Older notes below that say "scratchpad <script>" mean these.
 Folder tidy-up of 2026-11-09:
 - `docs\` holds the runtime contract and the merge manifest.
 - `tools\ps3\` holds the PKG/SELF extraction scripts (git-ignored, Sony keys).
@@ -1309,6 +1311,11 @@ Owner: "선수나 감독 스카우트 목록을 검색할때 영어로도 검색
 - The .bat files are no longer in the repository (`*.bat` in .gitignore). They stay on this PC for building: build_release.bat, build_launcher.bat, make_release.bat and run*.bat.
 - `tools/make_release.ps1` no longer puts run.bat in the release; the launcher starts the game itself.
 - Releases are on GitHub Releases: one zip with `Sakatsuku Launcher.exe` and `build-release\SakatsukuRecomp.exe` + SDL2.dll, and no game data.
+- **Clean-folder check (2026-11-09):**
+  - `Sakatsuku_PC_20261109-1309.zip` was unzipped into an empty folder, with `game\` linked by a junction to the real one. The junction was removed afterwards, the link only.
+  - It ran hidden and muted and reached the title in 12 s. The only errors were the known ones: the NP TUS NIDs, offline netctl, and the savedata stat -4 of a fresh gamedata. Launcher `--shot` rendered 9 pages.
+  - Found: the exe reads `game\firmware\libsre_image.bin` and `libspurs_jq_image.bin` (stubs.cpp, `SAKA_PRX_DIR` overrides). These are the relocated images from "Run 2–4", and `읽어주세요.txt` said only "libsre, libspurs_jq 등". make_release.ps1 now names them.
+  - The local zip was remade. The GitHub v2026.11.09 asset was replaced with it the same day (owner: "교체해"; 42,085,119 bytes, uploaded 06:53 UTC).
 
 ## Legend list re-check (2026-11-10, owner: "https://enjoigame.sakura.ne.jp/sakatsuku_2013/index.html 여기서 레전드 선수들 리스트 다시 체크해줘")
 - The site's 94 pages name only three such players, checked against txt_static_data.arch table 0:
@@ -1525,3 +1532,9 @@ REA Ghidra (`re/decomp_all.c`) plus tables read from `game/EBOOT.ELF`. The team 
 - **Seen:** previews of every texture (`logs/korean_ui/*.png`; crops in `logs/korean_ui/work/det2/c_*.png`). In game (hidden bench with the overlay; `logs/b14m_shots`, `logs/b14n_shots`, `logs/b14p_shots`): the game opens the rebuilt `tactics_setting.par` (log) and the 팀 전술 설정 screens work in Korean; the detail view with the vertical words was not reached in three tries (formation edit and opponent information came up instead), and none of the other screens of this batch (new game face edit, secretary edit, collection, hall of fame, youth discovery, promotion) was opened in game.
 - **Known flaws:** 설정 없음 sits on a lighter band across the grey head's eyes; the stamp's halo is a soft band rather than the old text's outline; the hair words are as faint as the originals (same colour).
 - **Still Japanese:** the three magazine-cover textures of `sb3/edit_close.par`, tiny decorative print, and a stamp 実行中 that an earlier note names: no texture processed so far holds it.
+
+## Guide, appendix and bench tools published (2026-11-15, owner: "현재까지 작업한 포팅관련 자료들을 런처까지 모두 깃헙에 업데이트하여 푸시해줘")
+- `docs/리컴프_지침서.md`, `docs/부록_엔진_미들웨어_패턴.md` and `tools/bench/` (19 files) are in the repository now. Until then they were kept local (owner, 2026-11-10: "놓아둬"); the owner chose "add all" when asked. `tools/bench/build_nov14_test.bat` stays local, as every `.bat` does.
+- Personal marks were taken out first (owner's choice): the two documents' byline names the GitHub account; `officebench.ps1` and `weekmatchbench.ps1` take the repository root from their own location (`$PSScriptRoot\..\..`) instead of an absolute path; `docs/MERGE_1.03.txt` writes its three folders with `%USERPROFILE%` (the earlier text stays in the history). One office bench run after the change: title at 9.6 s, office at 33 s, shots as before.
+- The launcher needed nothing: its source was current (last change b0cbe10) and the exe in the release zip has the same hash as the working exe.
+- Still outside the repository on purpose: the `.bat` files, the Korean overlay files (they derive from game data), `recompiled/` (its hand-made hooks are the `patches/recompiled-*.patch` series) and the changed files of the `ps3recomp` submodule (the `patches/00NN-*.patch` series).

@@ -1,7 +1,7 @@
 Saka Tsuku (BLJM61064) disc 1.00 + update 1.03 merge
-disc   : C:\Users\freeh\Desktop\Fight Emulations\Saka Tsuku - Pro Soccer Club o Tsukurou (Japan)\Saka Tsuku Ps3\PS3_GAME
-update : C:\Users\freeh\Desktop\Fight Emulations\Saka Tsuku - Pro Soccer Club o Tsukurou (Japan)\PC PORT\pkg_1.03\BLJM61064
-merged : C:\Users\freeh\Desktop\Fight Emulations\Saka Tsuku - Pro Soccer Club o Tsukurou (Japan)\PC PORT\merged_1.03\PS3_GAME
+disc   : %USERPROFILE%\Desktop\Fight Emulations\Saka Tsuku - Pro Soccer Club o Tsukurou (Japan)\Saka Tsuku Ps3\PS3_GAME
+update : %USERPROFILE%\Desktop\Fight Emulations\Saka Tsuku - Pro Soccer Club o Tsukurou (Japan)\PC PORT\pkg_1.03\BLJM61064
+merged : %USERPROFILE%\Desktop\Fight Emulations\Saka Tsuku - Pro Soccer Club o Tsukurou (Japan)\PC PORT\merged_1.03\PS3_GAME
 overlaid:
   USRDIR/EBOOT.BIN                             <- update USRDIR/EBOOT.BIN
   ICON0.PNG                                    <- update ICON0.PNG
