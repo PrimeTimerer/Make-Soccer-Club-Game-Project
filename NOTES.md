@@ -1582,3 +1582,19 @@ REA Ghidra (`re/decomp_all.c`) plus tables read from `game/EBOOT.ELF`. The team 
   - This folder: ready as before, uses `game/dev_bdvd`; title in 9 s with relative paths.
   - Not run: the PUP/PKG install buttons (RPCS3's own windows), the ISO copy, a real download-and-restart of the updater, and a full game on the new-PC folder beyond the title.
 - Launcher backup: `Sakatsuku Launcher.prev_1116.exe`.
+
+## Automatic port updates (2026-11-16, owner chose "자동으로 설치")
+- The daily check (when the launcher window opens) downloads a newer release without asking, into `update\download`. It checks the size and contents and moves the release to `update\ready` with `ready.txt` (`<stamp>\t<tag>`). The title bar says "새 버전 … 받음: 다음 실행 때 적용", and a toast says the same.
+- At the next start, `Program.Main` → `PortUpdate.ApplyAtStart` runs before any window. When the waiting version is newer than `version.txt` and the game is not running:
+  1. The game exe is copied to `SakatsukuRecomp.prev.exe`.
+  2. The running launcher is renamed to `.old.exe`.
+  3. The app files are copied in and `version.txt` is written.
+  4. The new launcher starts with the same arguments (`--play` included), and this process ends.
+  A waiting version that is not newer is dropped. A failure leaves the old version running and is written to `logs\launcher\update.log`.
+- Setting `AutoUpdate` (default 1, switch on the tools page). A git checkout (this folder) never downloads or applies. `--shot` makes no network calls.
+- The manual button now reuses a version already waiting ("지금 적용하고 런처 다시 열기").
+- **Check (test folder):** the 11-16 release with the new launcher; the newer zip (`Sakatsuku_PC_20261116-2306`) fed through `file://` to `Download`; then the launcher started with `--shot`.
+  - The first process applied the update and exited 0. The restarted launcher rendered all 10 pages.
+  - `version.txt` 2248 → 2306; the launcher is the new build; `update\ready` and `.old.exe` are gone; `prev.exe` exists; a personal cheat file is unchanged; no `update.log`.
+  - Not run: a real download from GitHub (the same WebClient call as the manual button).
+- Launcher backup: `Sakatsuku Launcher.prev_2248.exe` (the v2026.11.16 one).

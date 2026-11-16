@@ -105,11 +105,25 @@ namespace SakatsukuLauncher
             PortUpdate.CheckDaily(launcher, delegate(ReleaseInfo info)
             {
                 LatestRelease = info;
-                if (info.Newer)
+                if (!info.Newer)
+                    return;
+                UpdateBadge.Text = "새 버전 " + info.Tag + " 있음";
+                UpdateBadge.Visibility = Visibility.Visible;
+                if (!PortUpdate.AutoEnabled(launcher))
+                    return;
+                // Automatic: downloaded now, applied the next time the launcher opens.
+                UpdateBadge.Text = "새 버전 " + info.Tag + " 받는 중...";
+                PortUpdate.DownloadInBackground(launcher, info, delegate(string error)
                 {
-                    UpdateBadge.Text = "새 버전 " + info.Tag + " 있음";
-                    UpdateBadge.Visibility = Visibility.Visible;
-                }
+                    if (error != null)
+                    {
+                        UpdateBadge.Text = "새 버전 " + info.Tag + " 있음 (자동으로 받지 못함)";
+                        return;
+                    }
+                    UpdateBadge.Text = "새 버전 " + info.Tag + " 받음: 다음 실행 때 적용";
+                    Toast("새 버전 " + info.Tag + "을 받았습니다. 런처를 다시 열면 적용됩니다.");
+                    Refresh();
+                });
             });
             Closing += delegate
             {

@@ -49,7 +49,7 @@ Ready-to-run builds are on the [Releases](https://github.com/PrimeTimerer/Make-S
 
 Without RPCS3, already decrypted files (`EBOOT.ELF`, `libsre.prx`, `libspurs_jq.prx`) can be picked by hand on the same page.
 
-**Updates:** the launcher checks GitHub once a day. **도구 → 포트 업데이트** downloads the newest release and replaces only the app files. `game\`, `gamedata\` (saves), `launcher.ini` and your cheat settings stay as they are, and the previous game exe is kept as `build-release\SakatsukuRecomp.prev.exe`.
+**Updates:** the launcher checks GitHub once a day. When a newer release exists, it downloads it in the background without asking and applies it the next time the launcher opens, before any window appears. A switch in **도구 → 포트 업데이트** turns this off; the same card can also install at once. An update replaces only the app files. `game\`, `gamedata\` (saves), `launcher.ini` and your cheat settings stay as they are, and the previous game exe is kept as `build-release\SakatsukuRecomp.prev.exe`.
 
 ## Build (Windows)
 

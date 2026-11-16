@@ -203,6 +203,9 @@ namespace SakatsukuLauncher
                 stack.Children.Add(Ui.Text(info.Newer ? "새 버전이 있습니다. 설치하면 런처, 게임 실행 파일, 공용 치트 목록만 바뀌고 game, gamedata(세이브), 설정, 내 치트 설정은 그대로입니다. 이전 실행 파일은 build-release\\SakatsukuRecomp.prev.exe로 남습니다."
                                                   : "최신 버전입니다.", "Caption"));
             }
+            string[] ready = PortUpdate.Ready(Launcher);
+            if (ready != null)
+                stack.Children.Add(Line("받아 둔 버전", ready[1] + " (" + ready[0] + "): 다음에 런처를 열 때 적용됩니다", Ui.Brush("Accent")));
             if (updateLine != null)
                 stack.Children.Add(Ui.Text(updateLine, "Body"));
             var buttons = new WrapPanel { Margin = new Thickness(0, 8, 0, 0) };
@@ -229,13 +232,18 @@ namespace SakatsukuLauncher
             buttons.Children.Add(check);
             if (info != null && info.Newer && !PortUpdate.IsGitCheckout(Launcher))
             {
-                var install = Ui.Button(installing ? "설치 중..." : "설치하고 런처 다시 열기", delegate { Install(info); }, "AccentButton", "", new Thickness(0, 0, 8, 8));
+                var install = Ui.Button(installing ? "설치 중..." : ready != null ? "지금 적용하고 런처 다시 열기" : "설치하고 런처 다시 열기", delegate { Install(info); }, "AccentButton", "", new Thickness(0, 0, 8, 8));
                 install.IsEnabled = !installing;
                 buttons.Children.Add(install);
             }
             buttons.Children.Add(Ui.Button("릴리스 페이지", delegate { Process.Start(info != null && info.PageUrl != null ? info.PageUrl : PortUpdate.ReleasesPage); }, null, "", new Thickness(0, 0, 8, 8)));
             stack.Children.Add(buttons);
             stack.Children.Add(Ui.Switch(Launcher.Setting("UpdateCheck") != "0", delegate(bool on) { Launcher.SetSetting("UpdateCheck", on ? "1" : "0"); }, "런처를 열 때 하루 한 번 확인"));
+            var auto = Ui.Switch(Launcher.Setting("AutoUpdate") != "0", delegate(bool on) { Launcher.SetSetting("AutoUpdate", on ? "1" : "0"); }, "새 버전을 묻지 않고 받아 두고, 다음에 런처를 열 때 적용");
+            auto.Margin = new Thickness(0, 6, 0, 0);
+            stack.Children.Add(auto);
+            if (PortUpdate.IsGitCheckout(Launcher))
+                stack.Children.Add(Ui.Text("이 폴더는 개발(git) 폴더라 확인만 하고 받거나 바꾸지 않습니다.", "Caption"));
             return Ui.Card("포트 업데이트", stack);
         }
 

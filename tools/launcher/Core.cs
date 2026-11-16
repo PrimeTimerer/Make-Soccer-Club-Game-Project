@@ -40,6 +40,8 @@ namespace SakatsukuLauncher
                 app.Resources = (ResourceDictionary)XamlReader.Load(theme);
             var launcher = new Launcher(AppDomain.CurrentDomain.BaseDirectory.TrimEnd('\\', '/'));
             PortUpdate.CleanUp(launcher);
+            if (PortUpdate.ApplyAtStart(launcher, args))   // a new version downloaded earlier: put in place, start it
+                return 0;
             int shot = Array.FindIndex(args, a => a.Equals("--shot", StringComparison.OrdinalIgnoreCase));
             if (shot >= 0 && shot + 1 < args.Length)
                 return Shots.Run(app, launcher, args[shot + 1]);
@@ -81,6 +83,7 @@ namespace SakatsukuLauncher
         public static int Run(Application app, Launcher launcher, string dir)
         {
             Directory.CreateDirectory(dir);
+            PortUpdate.Disabled = true;
             var window = new MainWindow(launcher) { WindowStartupLocation = WindowStartupLocation.Manual, Left = -20000, Top = 0, ShowActivated = false, ShowInTaskbar = false };
             int shotHeight; // LAUNCHER_SHOT_HEIGHT=<px>: a taller window, to see the whole of a long page
             if (int.TryParse(Environment.GetEnvironmentVariable("LAUNCHER_SHOT_HEIGHT"), out shotHeight) && shotHeight > 0)
@@ -240,6 +243,7 @@ namespace SakatsukuLauncher
             { "AutoBackup", "1" },      // save data backup before each run
             { "BackupsToKeep", "10" },
             { "UpdateCheck", "1" },     // the launcher looks for a new release on GitHub once a day
+            { "AutoUpdate", "1" },      // ...downloads it without asking and applies it at the next start
         };
 
         public static string Default(string key)
