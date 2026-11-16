@@ -135,7 +135,8 @@ namespace SakatsukuLauncher
         protected override FrameworkElement Build()
         {
             string steam = SteamShortcut.SteamPath();
-            return Ui.Page("도구", "바로가기와 폴더.",
+            return Ui.Page("도구", "업데이트, 바로가기, 폴더.",
+                UpdateCard(),
                 Ui.Card("바로가기",
                     Ui.Setting("바탕화면 바로가기", "더블클릭하면 런처 창 없이 바로 게임이 시작됩니다 (--play). 오류로 끝날 때만 런처 창이 뜹니다.", Ui.Button("만들기", delegate
                     {
@@ -183,6 +184,103 @@ namespace SakatsukuLauncher
                     Ui.Text("サカつく プロサッカークラブをつくろう！ (" + GameFiles.TitleId + ", 1.03) PC 포트의 런처입니다. 비영리 팬 프로젝트이며 SEGA와 관계없습니다.", "Body"),
                     Ui.Text("게임과 그 안의 모든 데이터·코드의 권리는 SEGA에 있습니다. 런처와 포트에는 게임 데이터가 들어 있지 않고, 본인이 가진 게임 파일로만 동작합니다.", "Caption"),
                     Ui.Text("런처의 틀은 YKTK3 PC 런처에서 가져왔습니다.", "Caption")));
+        }
+
+        bool checking, installing;
+        string updateLine;
+
+        // 포트 업데이트: the newest GitHub release against this folder's version, and installing it.
+        Border UpdateCard()
+        {
+            ReleaseInfo info = Window.LatestRelease;
+            var stack = new StackPanel();
+            stack.Children.Add(Line("이 폴더", PortUpdate.LocalStamp(Launcher) + (PortUpdate.IsGitCheckout(Launcher) ? " (개발 폴더: git)" : "")));
+            if (info != null && info.Error != null)
+                stack.Children.Add(Line("최신 릴리스", "확인하지 못함: " + info.Error, Ui.Brush("Warn")));
+            else if (info != null)
+            {
+                stack.Children.Add(Line("최신 릴리스", info.Tag + (info.Stamp != null ? " (" + info.Stamp + ")" : ""), info.Newer ? Ui.Brush("Accent") : null));
+                stack.Children.Add(Ui.Text(info.Newer ? "새 버전이 있습니다. 설치하면 런처, 게임 실행 파일, 공용 치트 목록만 바뀌고 game, gamedata(세이브), 설정, 내 치트 설정은 그대로입니다. 이전 실행 파일은 build-release\\SakatsukuRecomp.prev.exe로 남습니다."
+                                                  : "최신 버전입니다.", "Caption"));
+            }
+            if (updateLine != null)
+                stack.Children.Add(Ui.Text(updateLine, "Body"));
+            var buttons = new WrapPanel { Margin = new Thickness(0, 8, 0, 0) };
+            var check = Ui.Button(checking ? "확인 중..." : "업데이트 확인", delegate
+            {
+                checking = true;
+                Window.Refresh();
+                var launcher = Launcher;
+                ThreadPool.QueueUserWorkItem(delegate
+                {
+                    ReleaseInfo found = PortUpdate.Check(launcher);
+                    Window.Dispatcher.BeginInvoke((Action)delegate
+                    {
+                        checking = false;
+                        Window.LatestRelease = found;
+                        Window.UpdateBadge.Visibility = found.Newer ? Visibility.Visible : Visibility.Collapsed;
+                        if (found.Newer)
+                            Window.UpdateBadge.Text = "새 버전 " + found.Tag + " 있음";
+                        Window.Refresh();
+                    });
+                });
+            }, null, "", new Thickness(0, 0, 8, 8));
+            check.IsEnabled = !checking && !installing;
+            buttons.Children.Add(check);
+            if (info != null && info.Newer && !PortUpdate.IsGitCheckout(Launcher))
+            {
+                var install = Ui.Button(installing ? "설치 중..." : "설치하고 런처 다시 열기", delegate { Install(info); }, "AccentButton", "", new Thickness(0, 0, 8, 8));
+                install.IsEnabled = !installing;
+                buttons.Children.Add(install);
+            }
+            buttons.Children.Add(Ui.Button("릴리스 페이지", delegate { Process.Start(info != null && info.PageUrl != null ? info.PageUrl : PortUpdate.ReleasesPage); }, null, "", new Thickness(0, 0, 8, 8)));
+            stack.Children.Add(buttons);
+            stack.Children.Add(Ui.Switch(Launcher.Setting("UpdateCheck") != "0", delegate(bool on) { Launcher.SetSetting("UpdateCheck", on ? "1" : "0"); }, "런처를 열 때 하루 한 번 확인"));
+            return Ui.Card("포트 업데이트", stack);
+        }
+
+        void Install(ReleaseInfo info)
+        {
+            Window.Confirm("업데이트 설치", info.Tag + " (" + PcInfo.Size(info.ZipSize) + ")를 받아 설치하고 런처를 다시 엽니다. 게임 파일과 세이브, 설정은 바뀌지 않습니다.", "설치", delegate
+            {
+                installing = true;
+                updateLine = "준비 중...";
+                Window.Refresh();
+                var launcher = Launcher;
+                ThreadPool.QueueUserWorkItem(delegate
+                {
+                    string next = null;
+                    Exception failed = null;
+                    try
+                    {
+                        next = PortUpdate.Install(launcher, info, delegate(string line)
+                        {
+                            Window.Dispatcher.BeginInvoke((Action)delegate
+                            {
+                                updateLine = line;
+                                Window.Refresh();
+                            });
+                        });
+                    }
+                    catch (Exception error)
+                    {
+                        failed = error;
+                    }
+                    Window.Dispatcher.BeginInvoke((Action)delegate
+                    {
+                        installing = false;
+                        if (failed != null)
+                        {
+                            updateLine = "실패: " + failed.Message;
+                            Window.Error("업데이트를 설치하지 못했습니다", failed);
+                            Window.Refresh();
+                            return;
+                        }
+                        Process.Start(next);
+                        Application.Current.Shutdown();
+                    });
+                });
+            });
         }
     }
 

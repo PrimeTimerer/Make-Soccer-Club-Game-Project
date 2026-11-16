@@ -46,6 +46,7 @@ namespace SakatsukuLauncher
         readonly Dictionary<string, IPage> pages = new Dictionary<string, IPage>();
         readonly Dictionary<string, Func<IPage>> factories = new Dictionary<string, Func<IPage>>();
         public readonly TextBlock UpdateBadge = new TextBlock();
+        public ReleaseInfo LatestRelease;
         IPage current;
 
         public MainWindow(Launcher launcher)
@@ -90,6 +91,7 @@ namespace SakatsukuLauncher
             Content = root;
 
             Add("home", "\uE80F", "홈", delegate { return new HomePage(this); });
+            Add("setup", "", "게임 파일", delegate { return new SetupPage(this); });
             Add("settings", "\uE713", "설정", delegate { return new SettingsPage(this); });
             Add("controllers", "\uE7FC", "컨트롤러", delegate { return new ControllerPage(this); });
             Add("saves", "\uE74E", "세이브", delegate { return new SavePage(this); });
@@ -99,6 +101,16 @@ namespace SakatsukuLauncher
             Add("logs", "\uE9F9", "로그", delegate { return new LogPage(this); });
             Add("tools", "\uE90F", "도구", delegate { return new ToolsPage(this); });
             Navigate("home");
+            // A new release on GitHub: a line in the title bar that opens the tools page (checked once a day).
+            PortUpdate.CheckDaily(launcher, delegate(ReleaseInfo info)
+            {
+                LatestRelease = info;
+                if (info.Newer)
+                {
+                    UpdateBadge.Text = "새 버전 " + info.Tag + " 있음";
+                    UpdateBadge.Visibility = Visibility.Visible;
+                }
+            });
             Closing += delegate
             {
                 if (current != null)

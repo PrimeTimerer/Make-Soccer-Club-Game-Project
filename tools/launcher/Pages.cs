@@ -166,7 +166,8 @@ namespace SakatsukuLauncher
             play.Click += delegate { Window.Play(false); };
             var safe = Ui.Button("안전 설정으로 실행", delegate { Window.Play(true); }, null, "", new Thickness(16, 0, 0, 0));
             safe.ToolTip = "이번 한 번만 원래 30fps, 정점 캐시·치트 끔으로 실행합니다 (설정은 바뀌지 않습니다).";
-            var buttons = Ui.Row(play, safe);
+            var buttons = files.Ready ? Ui.Row(play, safe)   // a new PC: the way to the game files first
+                : Ui.Row(Ui.Button("게임 파일 준비", delegate { Window.Navigate("setup"); }, "AccentButton", "", new Thickness(0, 0, 16, 0)), play, safe);
             buttons.VerticalAlignment = VerticalAlignment.Center;
             left.Children.Add(buttons);
             var keys = Ui.Text("패드가 없으면 키보드: 방향키 · Z × · X ○ · A □ · S △ · Enter START", "Caption");
@@ -254,13 +255,18 @@ namespace SakatsukuLauncher
                 return Line(label, (ok ? "✓ " : "✕ ") + value, ok ? Ui.Brush("Good") : Ui.Brush("Warn"));
             };
             stack.Children.Add(item(files.Eboot, "EBOOT.ELF", files.Eboot ? "1.03 ELF" : "없음 (1.03 ELF 필요)"));
+            stack.Children.Add(item(files.Firmware, "펌웨어", files.Firmware ? "libsre, libspurs_jq" : "모듈 없음"));
             stack.Children.Add(item(files.Disc, "디스크", files.Disc ? GameFiles.TitleId + " " + files.DiscVersion : "PS3_GAME 폴더 없음"));
             stack.Children.Add(item(files.Patch, "패치", files.Patch ? files.PatchVersion : files.PatchVersion.Length > 0 ? files.PatchVersion + " (1.03 필요)" : "1.03 패치 없음"));
             bool exe = File.Exists(Launcher.Exe);
             stack.Children.Add(item(exe, "실행 파일", exe ? (Launcher.Exe.Contains("build-release") ? "릴리스 빌드" : "디버그 빌드") : "빌드 필요 (build_release.bat)"));
             var open = Ui.Button("game 폴더 열기", delegate { Ui.OpenFolder(Launcher.GameDir); }, null, "", new Thickness(0, 6, 0, 0));
-            open.HorizontalAlignment = HorizontalAlignment.Left;
-            stack.Children.Add(open);
+            open.Margin = new Thickness(0, 6, 0, 0);
+            var setup = Ui.Button(files.Ready ? "게임 파일 페이지" : "게임 파일 준비", delegate { Window.Navigate("setup"); }, files.Ready ? null : "AccentButton", "", new Thickness(0, 6, 8, 0));
+            var row = new WrapPanel();   // wraps in the narrow card
+            row.Children.Add(setup);
+            row.Children.Add(open);
+            stack.Children.Add(row);
             return Ui.Card("게임 파일", stack);
         }
 

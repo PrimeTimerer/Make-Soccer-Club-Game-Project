@@ -1538,3 +1538,47 @@ REA Ghidra (`re/decomp_all.c`) plus tables read from `game/EBOOT.ELF`. The team 
 - Personal marks were taken out first (owner's choice): the two documents' byline names the GitHub account; `officebench.ps1` and `weekmatchbench.ps1` take the repository root from their own location (`$PSScriptRoot\..\..`) instead of an absolute path; `docs/MERGE_1.03.txt` writes its three folders with `%USERPROFILE%` (the earlier text stays in the history). One office bench run after the change: title at 9.6 s, office at 33 s, shots as before.
 - The launcher needed nothing: its source was current (last change b0cbe10) and the exe in the release zip has the same hash as the working exe.
 - Still outside the repository on purpose: the `.bat` files, the Korean overlay files (they derive from game data), `recompiled/` (its hand-made hooks are the `patches/recompiled-*.patch` series) and the changed files of the `ps3recomp` submodule (the `patches/00NN-*.patch` series).
+
+## Release zip on a new PC: game files from RPCS3, port updates from GitHub (2026-11-16, owner: "릴리즈만 다운 받고 원본데이터와 업데이트데이터만 확보된 PC에서는 쉽게 작동", "데이터를 자동으로 위치를 감지", "업데이트하는 방법")
+- **The constraint.** The update's EBOOT.BIN and the firmware's libsre.sprx / libspurs_jq.sprx are encrypted. Decrypting them needs Sony keys, which the port must not ship (tools/ps3 stays out of git). RPCS3 has the keys and a command line: `rpcs3.exe --decrypt <path>`, `--installpkg <pkg>`, `--installfw <pup>`.
+- **Checked by hand first:**
+  - `--decrypt` on copies writes `<name>.elf` / `<name>.prx` next to the input. RPCS3 runs headless and exits in under a second.
+  - It decrypts only the first of several paths, so the launcher runs it once per file.
+  - The results are byte for byte the port's own files: EBOOT.ELF SHA-256 a5144796…, libsre.prx 9E7EE6ED…, libspurs_jq.prx DFE0A5B8…
+  - `--installpkg` waits on RPCS3's own confirmation window, so the launcher shows RPCS3 for installs.
+  - RPCS3 refuses to run from a Temp folder.
+- **Launcher, new page 게임 파일 (`tools/launcher/Setup.cs`):**
+  - Finding RPCS3: the saved folder, a running RPCS3, or a search of Desktop, Documents, Downloads, the user folder, Program Files and drive roots, 4 levels deep. Of several, it picks the one holding this game's update, disc and firmware. This PC has two (a GT6 one too); the right one was found in 1.3 s.
+  - What it reads from RPCS3: `config/games.yml` (BLJM61064 → disc folder), `config/vfs.yml` (dev_hdd0 / dev_flash, default `$(EmulatorDir)`), the update's PARAM.SFO (APP_VER 01.03), and `dev_flash/sys/external/*.sprx`.
+  - 자동 준비:
+    1. Records the disc folder (`launcher.ini [Setup] DiscDir`, used in place, read only).
+    2. Copies the update folder into `game/dev_hdd0/game/BLJM61064` when 01.03 is missing.
+    3. Has RPCS3 decrypt copies in `game/_setup`.
+    4. Checks each result by SHA-256.
+    5. Relocates the two modules the way `lift_prx.py` does (bases 0x30000000 / 0x30100000), checks the images by SHA-256 and writes `game/firmware/<m>_image.bin`.
+    RPCS3's folders are not written; only its log is rewritten by each run.
+  - Also on the page: install firmware (PUP) or update (PKG) through RPCS3, pick a disc folder, copy a decrypted ISO into `game/dev_bdvd` (Windows mount, read only), and pick already decrypted files by hand (hash-checked).
+  - Home and `Game.Problem` point there. GameFiles now needs the firmware images too.
+- **Paths relative to the game's working folder (run.bat's way).** ps3recomp's cellGame keeps host paths in `CELL_GAME_PATH_MAX` (128) buffers. With an absolute HDD0 root, a 138-character test folder made a stray folder cut at 127 characters. The launcher now passes `game\dev_hdd0`, `game\dev_bdvd` and the Korean overlay relative to the port folder. Only an external disc folder stays absolute; it is read through the VFS, whose buffers are larger. The runtime buffers are unchanged; a deep external path could still meet them.
+- **Port updates (`tools/launcher/Update.cs`, tools page card 포트 업데이트, title-bar badge):**
+  - The check is once a day; a switch turns it off.
+  - It compares the newest release's `Sakatsuku_PC_<stamp>.zip` with `version.txt`, or with the exe time when that file is missing.
+  - Installing:
+    1. Downloads the zip.
+    2. Checks its size and contents.
+    3. Copies the game exe to `build-release/SakatsukuRecomp.prev.exe`.
+    4. Renames the running launcher to `.old.exe`.
+    5. Copies the app files in and writes `version.txt`.
+    6. Starts the new launcher. The next start deletes the leftovers.
+  - Personal files are not in the zip and stay as they are: game, gamedata, launcher.ini and the cheat settings.
+  - A git checkout (this folder) only shows the check and never installs.
+- **make_release.ps1:** writes `version.txt`. Its stamp is now the newer of the exe and the launcher, so a launcher-only release counts as new. `읽어주세요.txt` describes the RPCS3 route.
+- **Checks:**
+  - Clean folder (the 11-14 zip with the new launcher, a 138-character path): RPCS3 found; 자동 준비 in 1.1 s; every hash matched.
+  - Booting that folder hidden, with the launcher's own environment and the disc read from RPCS3's folder: title in 7 s; both modules loaded; no stray folder after the relative-path fix.
+  - Update check against GitHub: v2026.11.14.2, same stamp, so not newer.
+  - Install from a local zip through `file://`: exe backup, launcher swap and personal cheat file all correct.
+  - `--shot` of every page, empty and prepared.
+  - This folder: ready as before, uses `game/dev_bdvd`; title in 9 s with relative paths.
+  - Not run: the PUP/PKG install buttons (RPCS3's own windows), the ISO copy, a real download-and-restart of the updater, and a full game on the new-PC folder beyond the title.
+- Launcher backup: `Sakatsuku Launcher.prev_1116.exe`.

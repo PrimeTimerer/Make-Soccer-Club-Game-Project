@@ -33,7 +33,23 @@ This is a native PC port of **サカつく プロサッカークラブをつく�
 
 ## Download
 
-Ready-to-run builds are on the [Releases](https://github.com/PrimeTimerer/Make-Soccer-Club-Game-Project/releases) page: `Sakatsuku Launcher.exe` and `build-release\SakatsukuRecomp.exe` in one zip. Unzip it, put the files from your own disc in `game\` (see `읽어주세요.txt` in the zip), and run `Sakatsuku Launcher.exe`. The zip contains no game data.
+Ready-to-run builds are on the [Releases](https://github.com/PrimeTimerer/Make-Soccer-Club-Game-Project/releases) page: `Sakatsuku Launcher.exe` and `build-release\SakatsukuRecomp.exe` in one zip. The zip contains no game data.
+
+**What you need:** your own disc (BLJM61064, as a disc folder or a decrypted ISO), the 1.03 update PKG, the PS3 firmware (`PS3UPDAT.PUP`, from PlayStation's PS3 system software update page), and [RPCS3](https://rpcs3.net/download). RPCS3 decrypts the update's EBOOT and two firmware modules. The port never ships or uses Sony keys.
+
+1. In RPCS3, install the firmware and the 1.03 update, and add the disc to its game list. The launcher's **게임 파일** page also has buttons for these steps.
+2. Unzip the release anywhere, run `Sakatsuku Launcher.exe` and open **게임 파일**. The launcher finds RPCS3 by itself; if it does not, pick its folder. Then press **자동 준비**. The launcher:
+   - runs RPCS3's `--decrypt` on copies of the files;
+   - checks every result against the files the port was built from (SHA-256);
+   - relocates the firmware modules;
+   - copies the 1.03 update into `game\dev_hdd0`;
+   - uses the disc where it is.
+   RPCS3's own folders are not changed.
+3. Press **플레이** on the home page.
+
+Without RPCS3, already decrypted files (`EBOOT.ELF`, `libsre.prx`, `libspurs_jq.prx`) can be picked by hand on the same page.
+
+**Updates:** the launcher checks GitHub once a day. **도구 → 포트 업데이트** downloads the newest release and replaces only the app files. `game\`, `gamedata\` (saves), `launcher.ini` and your cheat settings stay as they are, and the previous game exe is kept as `build-release\SakatsukuRecomp.prev.exe`.
 
 ## Build (Windows)
 

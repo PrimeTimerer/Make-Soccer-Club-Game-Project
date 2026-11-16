@@ -14,7 +14,9 @@ foreach ($need in $exe, $launcher) {
     if (-not (Test-Path -LiteralPath $need)) { throw "$need 이(가) 없습니다. build_release.bat / build_launcher.bat로 먼저 빌드하세요." }
 }
 
-$stamp = (Get-Item -LiteralPath $exe).LastWriteTime.ToString('yyyyMMdd-HHmm')
+# The newer of the game exe and the launcher: a launcher-only release still gets a newer version (the launcher's
+# update check compares these stamps).
+$stamp = (@((Get-Item -LiteralPath $exe).LastWriteTime, (Get-Item -LiteralPath $launcher).LastWriteTime) | Measure-Object -Maximum).Maximum.ToString('yyyyMMdd-HHmm')
 $name = "Sakatsuku_PC_$stamp"
 $dist = Join-Path $root 'dist'
 $out = Join-Path $dist $name
@@ -48,15 +50,28 @@ $guide = @"
 
 실행: "Sakatsuku Launcher.exe"
 
-게임 파일은 들어 있지 않습니다. 이 폴더에 game 폴더를 만들고 본인 디스크의 파일을 넣으세요.
-  game\EBOOT.ELF       1.03 업데이트의 복호화된 EBOOT
-  game\dev_bdvd\       디스크 (PS3_GAME 등)
-  game\dev_hdd0\       1.03 업데이트 (game\BLJM61064\...)
-  game\firmware\       libsre_image.bin, libspurs_jq_image.bin (본인 펌웨어의 libsre/libspurs_jq를 복호화·재배치한 이미지, NOTES.md "Run 2–4")
-세이브는 gamedata\ 에 생깁니다. 만드는 법은 README.md 와 NOTES.md (저장소)에 있습니다.
+게임 파일은 들어 있지 않습니다. 본인의 것으로 런처의 '게임 파일' 페이지가 자동으로 준비합니다.
+
+필요한 것
+  - サカつく 디스크 (BLJM61064): 디스크 폴더(PS3_GAME) 또는 복호화된 ISO
+  - 1.03 업데이트 PKG
+  - PS3 펌웨어 (PS3UPDAT.PUP, PlayStation 공식 사이트의 PS3 시스템 소프트웨어 업데이트)
+  - RPCS3 (rpcs3.net): 암호화된 EBOOT와 펌웨어를 복호화하는 데 씁니다
+
+순서
+  1. RPCS3에 펌웨어와 1.03 업데이트를 설치하고, 디스크를 RPCS3 게임 목록에 추가합니다.
+     (런처의 '게임 파일' 페이지에도 펌웨어·업데이트 설치 버튼과 디스크 폴더·ISO 고르기가 있습니다.)
+  2. "Sakatsuku Launcher.exe"를 열고 '게임 파일' 페이지에서 '자동 준비'를 누릅니다.
+     런처가 RPCS3를 찾아 복호화하고, 결과를 확인해 game 폴더에 넣습니다. RPCS3의 파일은 바꾸지 않습니다.
+  3. 홈에서 플레이.
+
+세이브는 gamedata\ 에 생깁니다.
+새 버전: 런처의 '도구' > '포트 업데이트'에서 받습니다 (game, gamedata, 설정, 내 치트 설정은 그대로).
 "@
 if ($WithGame) { $guide = "사카츠쿠 PS3 PC 포트 ($name)`r`n`r`n실행: `"Sakatsuku Launcher.exe`"`r`ngame\ 와 gamedata\ (세이브) 포함본입니다. 본인 PC 이전용이며 다른 사람에게 배포하지 마세요." }
 [IO.File]::WriteAllText((Join-Path $out '읽어주세요.txt'), $guide, (New-Object Text.UTF8Encoding($true)))
+# The launcher's update check compares this with the newest release's zip name (Sakatsuku_PC_<stamp>.zip).
+[IO.File]::WriteAllText((Join-Path $out 'version.txt'), $stamp, (New-Object Text.UTF8Encoding($false)))
 
 $zip = $null
 if (-not $WithGame -and -not $NoZip) {

@@ -39,6 +39,7 @@ namespace SakatsukuLauncher
             using (Stream theme = typeof(Program).Assembly.GetManifestResourceStream("Theme.xaml"))
                 app.Resources = (ResourceDictionary)XamlReader.Load(theme);
             var launcher = new Launcher(AppDomain.CurrentDomain.BaseDirectory.TrimEnd('\\', '/'));
+            PortUpdate.CleanUp(launcher);
             int shot = Array.FindIndex(args, a => a.Equals("--shot", StringComparison.OrdinalIgnoreCase));
             if (shot >= 0 && shot + 1 < args.Length)
                 return Shots.Run(app, launcher, args[shot + 1]);
@@ -85,7 +86,7 @@ namespace SakatsukuLauncher
             if (int.TryParse(Environment.GetEnvironmentVariable("LAUNCHER_SHOT_HEIGHT"), out shotHeight) && shotHeight > 0)
                 window.Height = shotHeight;
             window.Show();
-            string[] keys = { "home", "settings", "controllers", "saves", "cheats", "players", "lists", "logs", "tools" };
+            string[] keys = { "home", "setup", "settings", "controllers", "saves", "cheats", "players", "lists", "logs", "tools" };
             int i = 0;
             var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(800) };
             timer.Tick += delegate
@@ -140,7 +141,17 @@ namespace SakatsukuLauncher
         public string LogsDir { get { return Path.Combine(Dir, "logs", "launcher"); } }
         public string GameDir { get { return Path.Combine(Dir, "game"); } }
         public string Eboot { get { return Path.Combine(GameDir, "EBOOT.ELF"); } }
-        public string Bdvd { get { return Path.Combine(GameDir, "dev_bdvd"); } }
+        public string FirmwareDir { get { return Path.Combine(GameDir, "firmware"); } }
+        // The disc: where the 게임 파일 page found or was shown it (launcher.ini [Setup] DiscDir, read only), else
+        // game\dev_bdvd.
+        public string Bdvd
+        {
+            get
+            {
+                string chosen = SetupValue("DiscDir");
+                return chosen.Length > 0 && Setup.IsDisc(chosen) ? chosen : Path.Combine(GameDir, "dev_bdvd");
+            }
+        }
         public string Hdd0 { get { return Path.Combine(GameDir, "dev_hdd0"); } }
         // cellSaveData: ./gamedata/dev_hdd0/home/00000001/savedata under the game's working folder (this one).
         public string SavesDir { get { return Path.Combine(Dir, "gamedata", "dev_hdd0", "home", "00000001", "savedata"); } }
@@ -187,6 +198,19 @@ namespace SakatsukuLauncher
             ini.Save();
         }
 
+        // launcher.ini [Setup]: where the game files come from (Rpcs3, DiscDir).
+        public string SetupValue(string key)
+        {
+            return new IniFile(StatePath).Get("Setup", key, "");
+        }
+
+        public void SetSetupValue(string key, string value)
+        {
+            var ini = new IniFile(StatePath);
+            ini.Set("Setup", key, value);
+            ini.Save();
+        }
+
         public void AddPlayTime(TimeSpan time)
         {
             long seconds;
@@ -215,6 +239,7 @@ namespace SakatsukuLauncher
             { "Keyboard", "1" },        // PAD_NO_KEYBOARD=1 turns the keyboard pad off
             { "AutoBackup", "1" },      // save data backup before each run
             { "BackupsToKeep", "10" },
+            { "UpdateCheck", "1" },     // the launcher looks for a new release on GitHub once a day
         };
 
         public static string Default(string key)
@@ -225,14 +250,24 @@ namespace SakatsukuLauncher
 
         public static IEnumerable<string> Keys { get { return defaults.Keys; } }
 
+        // A path inside the port's folder, relative to it (the game runs there); any other path as it is.
+        static string Relative(Launcher launcher, string path)
+        {
+            string dir = launcher.Dir.TrimEnd('\\', '/') + "\\";
+            return path.StartsWith(dir, StringComparison.OrdinalIgnoreCase) ? path.Substring(dir.Length) : path;
+        }
+
         // The environment for one run. safe: this run only, the port as it was before the 60-tick work (30 fps,
         // no vertex cache); nothing is written.
         public static Dictionary<string, string> Environment(Launcher launcher, bool safe)
         {
             var env = new Dictionary<string, string>();
             // run.bat: /dev_bdvd -> game\dev_bdvd (original disc, read-only), /dev_hdd0 -> game\dev_hdd0 (1.03 patch).
-            env["PS3_VFS_ROOT"] = launcher.Bdvd;
-            env["PS3_HDD0_ROOT"] = launcher.Hdd0;
+            // Folders inside the port's folder go relative to the game's working folder (this one), as run.bat did:
+            // ps3recomp's cellGame keeps host paths in 128-byte buffers, and a deep folder (2026-11-16: a 138-character
+            // test path) was cut to 127 characters, leaving a stray folder beside this one.
+            env["PS3_VFS_ROOT"] = Relative(launcher, launcher.Bdvd);
+            env["PS3_HDD0_ROOT"] = Relative(launcher, launcher.Hdd0);
             env["RT_DISPLAY_BY_SIZE"] = "1";
             env["RSX_LIVE_DRAW"] = "1";
             bool fps60 = !safe && launcher.On("Fps60");
@@ -246,7 +281,7 @@ namespace SakatsukuLauncher
             env["LD_VTX_CACHE_MB"] = cache && mb != Default("VertexCacheMB") ? mb : null;
             env["D3D12_VSYNC"] = launcher.On("VSync") ? null : "0";
             env["LD_SYNC_INTERVAL"] = launcher.On("VSync") && launcher.On("SyncHighRefresh") ? "auto" : null;
-            env["PS3_USRDIR_OVERLAY"] = !safe && launcher.On("KoreanPatch") && KoreanPatch.Installed(launcher) ? KoreanPatch.Dir(launcher) : null;
+            env["PS3_USRDIR_OVERLAY"] = !safe && launcher.On("KoreanPatch") && KoreanPatch.Installed(launcher) ? Relative(launcher, KoreanPatch.Dir(launcher)) : null;
             env["PS3_MUTE"] = launcher.On("Mute") ? "1" : null;
             env["PAD_NO_KEYBOARD"] = launcher.On("Keyboard") ? null : "1";
             env["SAKA_CHEATS"] = safe ? "0" : null; // the cheat thread (cheats\enabled.txt)
@@ -408,12 +443,12 @@ namespace SakatsukuLauncher
     public class GameFiles
     {
         public const string TitleId = "BLJM61064";
-        public bool Eboot, Disc, Patch;
+        public bool Eboot, Disc, Patch, Firmware;
         public string Title = "サカつく プロサッカークラブをつくろう！", DiscVersion = "", PatchVersion = "";
 
         public static GameFiles Check(Launcher launcher)
         {
-            var files = new GameFiles { Eboot = File.Exists(launcher.Eboot) };
+            var files = new GameFiles { Eboot = File.Exists(launcher.Eboot), Firmware = Setup.FirmwareReady(launcher) };
             Dictionary<string, string> disc = Sfo.Read(Path.Combine(launcher.Bdvd, "PS3_GAME", "PARAM.SFO"));
             files.Disc = Sfo.Get(disc, "TITLE_ID") == TitleId && Directory.Exists(Path.Combine(launcher.Bdvd, "PS3_GAME", "USRDIR"));
             files.DiscVersion = Sfo.Get(disc, "APP_VER");
@@ -425,7 +460,7 @@ namespace SakatsukuLauncher
             return files;
         }
 
-        public bool Ready { get { return Eboot && Disc && Patch; } }
+        public bool Ready { get { return Eboot && Disc && Patch && Firmware; } }
 
         public string Cover(Launcher launcher, string name)
         {
@@ -451,12 +486,15 @@ namespace SakatsukuLauncher
             if (IsRunning)
                 return "게임이 이미 실행 중입니다.";
             GameFiles files = GameFiles.Check(launcher);
+            const string page = "\n\n왼쪽 '게임 파일' 페이지에서 RPCS3로 자동 준비할 수 있습니다.";
             if (!files.Eboot)
-                return "game\\EBOOT.ELF(1.03)가 없습니다. PORT_1.03_RUNTIME.md대로 1.03 ELF를 넣어 주세요.";
+                return "game\\EBOOT.ELF(1.03)가 없습니다." + page;
+            if (!files.Firmware)
+                return "game\\firmware에 펌웨어 모듈(libsre, libspurs_jq)이 없습니다." + page;
             if (!files.Disc)
-                return "game\\dev_bdvd에 원본 디스크(" + GameFiles.TitleId + ")의 PS3_GAME 폴더가 없습니다.";
+                return "원본 디스크(" + GameFiles.TitleId + ")의 PS3_GAME 폴더를 찾지 못했습니다." + page;
             if (!files.Patch)
-                return "game\\dev_hdd0\\game\\" + GameFiles.TitleId + "에 1.03 패치가 없습니다" + (files.PatchVersion.Length > 0 ? " (지금 " + files.PatchVersion + ")" : "") + ".";
+                return "game\\dev_hdd0\\game\\" + GameFiles.TitleId + "에 1.03 업데이트가 없습니다" + (files.PatchVersion.Length > 0 ? " (지금 " + files.PatchVersion + ")" : "") + "." + page;
             return null;
         }
     }
