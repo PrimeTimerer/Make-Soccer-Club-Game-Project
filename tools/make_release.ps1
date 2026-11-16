@@ -1,5 +1,6 @@
 ﻿# Builds a ready-to-play folder (and a zip of it) from this checkout, in dist\Sakatsuku_PC_<exe time>\:
-#   Sakatsuku Launcher.exe, build-release\SakatsukuRecomp.exe + its DLLs, the shared cheat lists, README, LICENSE.
+#   Sakatsuku Launcher.exe, build-release\SakatsukuRecomp.exe + its DLLs and the VC++ runtime, the shared cheat lists,
+#   README, LICENSE.
 # The player's own files are left out: game\ (disc, update, firmware), gamedata\ (saves), launcher.ini and the personal
 # cheat files (enabled/values/players/lists, live\, saves\).
 #   -WithGame  also copies game\ (about 6.6 GB) and gamedata\, to move everything to another PC of your own. No zip then.
@@ -26,6 +27,23 @@ New-Item -ItemType Directory -Force (Join-Path $out 'build-release'), (Join-Path
 Copy-Item -LiteralPath $launcher -Destination $out
 Copy-Item -LiteralPath $exe -Destination (Join-Path $out 'build-release')
 Get-ChildItem -LiteralPath (Join-Path $root 'build-release') -Filter *.dll -File | Copy-Item -Destination (Join-Path $out 'build-release')
+# The Visual C++ runtime the exe imports (MSVCP140, VCRUNTIME140, VCRUNTIME140_1), next to it, so a fresh Windows
+# without the VC++ Redistributable runs the game too (app-local copies from Visual Studio's redist folder).
+$crtNames = 'msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll'
+$crt = $null
+$vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+if (Test-Path -LiteralPath $vswhere) {
+    $vs = (& $vswhere -latest -products * -property installationPath | Select-Object -First 1)
+    if ($vs) {
+        $crt = Get-ChildItem -LiteralPath (Join-Path $vs 'VC\Redist\MSVC') -Directory -ErrorAction SilentlyContinue | Sort-Object Name -Descending |
+            ForEach-Object { Get-ChildItem -LiteralPath (Join-Path $_.FullName 'x64') -Directory -Filter 'Microsoft.VC*.CRT' -ErrorAction SilentlyContinue } |
+            Where-Object { $d = $_.FullName; ($crtNames | Where-Object { -not (Test-Path -LiteralPath (Join-Path $d $_)) }).Count -eq 0 } |
+            Select-Object -First 1
+    }
+}
+if (-not $crt) { throw "Visual Studio의 x64 VC++ 런타임(VC\Redist\MSVC\...\x64\Microsoft.VC*.CRT)을 찾지 못했습니다." }
+foreach ($f in $crtNames) { Copy-Item -LiteralPath (Join-Path $crt.FullName $f) -Destination (Join-Path $out 'build-release') }
+"VC++ 런타임: $($crt.FullName)"
 foreach ($f in 'README.md', 'LICENSE') {   # no bat files: the launcher starts the game (owner, 2026-11-09)
     $p = Join-Path $root $f
     if (Test-Path -LiteralPath $p) { Copy-Item -LiteralPath $p -Destination $out }

@@ -1598,3 +1598,13 @@ REA Ghidra (`re/decomp_all.c`) plus tables read from `game/EBOOT.ELF`. The team 
   - `version.txt` 2248 → 2306; the launcher is the new build; `update\ready` and `.old.exe` are gone; `prev.exe` exists; a personal cheat file is unchanged; no `update.log`.
   - Not run: a real download from GitHub (the same WebClient call as the manual button).
 - Launcher backup: `Sakatsuku Launcher.prev_2248.exe` (the v2026.11.16 one).
+
+## VC++ runtime in the release zip; data bundle for the owner's other PC (2026-11-16)
+- `dumpbin /dependents` on the game exe: besides Windows DLLs, D3D12 and SDL2, it imports `MSVCP140.dll`, `VCRUNTIME140.dll`, `VCRUNTIME140_1.dll` and the UCRT. A fresh Windows without the VC++ 2015-2022 Redistributable would not start it. The UCRT is part of Windows 10/11.
+- `tools/make_release.ps1` now copies those three DLLs from Visual Studio's redist folder (`VC\Redist\MSVC\<newest>\x64\Microsoft.VC*.CRT`, found with vswhere) next to the exe in `build-release`. Updates carry them too, since the updater copies every file of the zip.
+  - Checked: the zip holds 14.44.35211 copies, the build toolset's.
+  - The release exe started from the dist folder ran its own code and exited with 2 (no game files). A missing DLL would end with 0xC0000135.
+- Owner's own transfer: `dist\이전용_20261116\Sakatsuku_데이터_20261116.7z.001-003`, 2 GB volumes, 5.7 GB in all.
+  - Contents: `game\` (all of it), `gamedata\`, `cheats\` without `live\`, `launcher.ini`, the three runtime DLLs in `build-release\`. Extract it into a release folder.
+  - Checked: 7-Zip test OK; 1701 game and 27 gamedata entries, the same as the source.
+  - For the owner's PCs only (decrypted game and firmware); not in the repository.

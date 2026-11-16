@@ -33,7 +33,7 @@ This is a native PC port of **サカつく プロサッカークラブをつく�
 
 ## Download
 
-Ready-to-run builds are on the [Releases](https://github.com/PrimeTimerer/Make-Soccer-Club-Game-Project/releases) page: `Sakatsuku Launcher.exe` and `build-release\SakatsukuRecomp.exe` in one zip. The zip contains no game data.
+Ready-to-run builds are on the [Releases](https://github.com/PrimeTimerer/Make-Soccer-Club-Game-Project/releases) page: `Sakatsuku Launcher.exe` and `build-release\SakatsukuRecomp.exe` in one zip. The zip also holds the Visual C++ runtime DLLs the game needs (`msvcp140.dll`, `vcruntime140.dll`, `vcruntime140_1.dll`), so a fresh Windows does not need the VC++ Redistributable. The zip contains no game data.
 
 **What you need:** your own disc (BLJM61064, as a disc folder or a decrypted ISO), the 1.03 update PKG, the PS3 firmware (`PS3UPDAT.PUP`, from PlayStation's PS3 system software update page), and [RPCS3](https://rpcs3.net/download). RPCS3 decrypts the update's EBOOT and two firmware modules. The port never ships or uses Sony keys.
 
